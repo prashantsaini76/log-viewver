@@ -1,0 +1,30 @@
+
+[partycoredetailsmgmt-api-1-0-1-17-38-whr9t] [2025-07-20T14:59:00.007] RECEIVED-REQUEST
+headers={accept-encoding=[gzip], authorization=[Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9], channel-id=[BBOS], correlation-id=[da0692784-65a2-11f0-817a-233b2e540000], content-type=[application/json]}
+uri=/searchLinkedOrganizationDetail
+method=POST
+x-forwarded-host=zuul-gateway-pt-s1-20520.np2.apaas4.barclays.intranet
+payload={"searchType":"OrgID","searchValue":"123456789"}
+END-OF-REQUEST
+
+Start Time --> 2025-07-20T14:59:00.007 , End Time --> 2025-07-20T14:59:04.057 , Total Execution Time : 44ms
+[2025-07-20T14:59:04.057] RETURNED-RESPONSE
+payload={"error":{"id":"5730541-1cf7-4534-ae52-758e7c72925b","code":"DETAIL_RECORD_NOT_FOUND","title":"No Record found for the supplied request"}}
+END-OF-RESPONSE
+
+
+
+
+[jhandcoredetails-api-1-0-1-17-38-whr9t] [2025-07-20T14:59:00.007] RECEIVED-REQUEST
+headers={accept-encoding=[gzip], authorization=[Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9], channel-id=[BBOS], correlation-id=[da0692784-65a2-11f0-817a-233b2e540000], content-type=[application/json]}
+uri=/test
+method=POST
+x-forwarded-host=zuul-gateway-pt-s1-20520.np2.apaas4.barclays.intranet
+payload={"searchType":"OrgID","searchValue":"123456789"}
+END-OF-REQUEST
+
+Start Time --> 2025-07-20T14:59:00.007 , End Time --> 2025-07-20T14:59:04.057 , Total Execution Time : 44ms
+[2025-07-20T14:59:04.057] RETURNED-RESPONSE
+payload={"error":{"id":"5730541-1cf7-4534-ae52-758e7c72925b","code":"DETAIL_RECORD_NOT_FOUND","title":"No Record found for the supplied request"}}
+END-OF-RESPONSE
+
