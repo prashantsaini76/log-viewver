@@ -713,20 +713,30 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
           const newIndent = additionalIndent + ' '.repeat(relativeIndent);
           
           // Debug: Log if we're about to add a line with suspicious indentation
-          if (newIndent.length < 2 && result.length > 10) {
-            console.error(`⚠️ WARNING: About to add line with ${newIndent.length} spaces at result line ${result.length + 1}`);
+          if (newIndent.length === 0) {
+            console.error(`⚠️ WARNING: About to add line with 0 spaces at result line ${result.length + 1}`);
             console.error(`   Content: "${contentLine.trim()}"`);
             console.error(`   Include key: "${key}", path: ${includePath.trim()}`);
             console.error(`   Base indent: "${indent}" (${indent.length} chars)`);
             console.error(`   Additional indent: "${additionalIndent}" (${additionalIndent.length} chars)`);
             console.error(`   Relative indent: ${relativeIndent}`);
-            console.error(`   Previous 3 lines:`);
-            result.slice(-3).forEach((line, idx) => {
-              console.error(`     ${result.length - 2 + idx}: [${line.search(/\S/)}sp] ${line}`);
+            console.error(`   Line from included file had ${lineIndent} spaces`);
+            console.error(`   Base indent of included file: ${baseIndentOfIncludedFile}`);
+            console.error(`   Result has ${result.length} lines so far`);
+            console.error(`   Previous 5 lines:`);
+            result.slice(-5).forEach((line, idx) => {
+              const spaces = line.search(/\S/) === -1 ? 0 : line.search(/\S/);
+              console.error(`     ${result.length - 4 + idx}: [${spaces}sp] ${line}`);
             });
+            
+            // FORCE a minimum indentation to prevent YAML errors
+            console.error(`   🔧 FIXING: Forcing minimum 2 spaces indentation`);
           }
           
-          result.push(newIndent + contentLine.trim());
+          // Safety fix: Never allow 0-indent lines deep in the file
+          const finalIndent = newIndent.length === 0 && result.length > 5 ? '  ' : newIndent;
+          
+          result.push(finalIndent + contentLine.trim());
         } else {
           result.push(contentLine);
         }
@@ -765,19 +775,29 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
           const newIndent = indent + ' '.repeat(relativeIndent);
           
           // Debug: Log if we're about to add a line with suspicious indentation
-          if (newIndent.length < 2 && result.length > 10) {
-            console.error(`⚠️ WARNING: About to add line with ${newIndent.length} spaces at result line ${result.length + 1}`);
+          if (newIndent.length === 0) {
+            console.error(`⚠️ WARNING: About to add line with 0 spaces at result line ${result.length + 1}`);
             console.error(`   Content: "${contentLine.trim()}"`);
             console.error(`   Include path: ${includePath.trim()}`);
             console.error(`   Base indent: "${indent}" (${indent.length} chars)`);
             console.error(`   Relative indent: ${relativeIndent}`);
-            console.error(`   Previous 3 lines:`);
-            result.slice(-3).forEach((line, idx) => {
-              console.error(`     ${result.length - 2 + idx}: [${line.search(/\S/)}sp] ${line}`);
+            console.error(`   Line from included file had ${lineIndent} spaces`);
+            console.error(`   Base indent of included file: ${baseIndentOfIncludedFile}`);
+            console.error(`   Result has ${result.length} lines so far`);
+            console.error(`   Previous 5 lines:`);
+            result.slice(-5).forEach((line, idx) => {
+              const spaces = line.search(/\S/) === -1 ? 0 : line.search(/\S/);
+              console.error(`     ${result.length - 4 + idx}: [${spaces}sp] ${line}`);
             });
+            
+            // FORCE a minimum indentation to prevent YAML errors
+            console.error(`   🔧 FIXING: Forcing minimum 2 spaces indentation`);
           }
           
-          result.push(newIndent + contentLine.trim());
+          // Safety fix: Never allow 0-indent lines deep in the file
+          const finalIndent = newIndent.length === 0 && result.length > 5 ? '  ' : newIndent;
+          
+          result.push(finalIndent + contentLine.trim());
         } else {
           result.push(contentLine);
         }
