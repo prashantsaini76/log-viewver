@@ -1267,6 +1267,22 @@ function resolveTraits(ramlData: any, libraries: { [key: string]: any } = {}): a
 /**
  * Convert resolved RAML data to OpenAPI 3.0 specification
  */
+/**
+ * Format the info description with structured metadata
+ */
+function formatInfoDescription(description: string): string {
+  const formatted = `- **API Type:** internal
+- **API Risk Classification:** LOW
+- **API Owner (business):** bp-tcv-ad@barclays.com
+- **API Owner (technical):** bp-tcv-ad@barclays.com
+- **Overview:** ${description || 'API description'}`;
+  
+  return formatted;
+}
+
+/**
+ * Convert RAML specification to OpenAPI Specification
+ */
 function convertRamlToOasSpec(ramlData: any): any {
   // Basic OAS 3.0 structure
   const oas: any = {
@@ -1274,7 +1290,12 @@ function convertRamlToOasSpec(ramlData: any): any {
     info: {
       title: ramlData.title || 'API',
       version: ramlData.version || '1.0.0',
-      description: ramlData.description || '',
+      description: formatInfoDescription(ramlData.description || ''),
+      contact: {
+        name: 'TODO',
+        url: 'https://TODO',
+        email: 'TODO@barclays.com'
+      }
     },
     servers: [],
     paths: {},
@@ -1288,6 +1309,7 @@ function convertRamlToOasSpec(ramlData: any): any {
   if (ramlData.baseUri) {
     oas.servers.push({
       url: ramlData.baseUri.replace(/{version}/g, ramlData.version || '1.0.0'),
+      description: 'TODO'
     });
   }
 
@@ -1295,8 +1317,33 @@ function convertRamlToOasSpec(ramlData: any): any {
   if (ramlData.protocols && ramlData.protocols.length > 0) {
     const protocol = ramlData.protocols[0].toLowerCase();
     if (!ramlData.baseUri) {
-      oas.servers.push({ url: `${protocol}://example.com` });
+      oas.servers.push({ 
+        url: `${protocol}://example.com`,
+        description: 'TODO'
+      });
     }
+  }
+  
+  // If still no servers, add default template
+  if (oas.servers.length === 0) {
+    oas.servers.push({
+      url: 'https://{server}/{contextRoot}/{version}',
+      description: 'TODO',
+      variables: {
+        server: {
+          default: 'api.example.com',
+          description: 'Server hostname'
+        },
+        contextRoot: {
+          default: 'api',
+          description: 'API context root'
+        },
+        version: {
+          default: ramlData.version || 'v1',
+          description: 'API version'
+        }
+      }
+    });
   }
 
   // Convert security schemes
@@ -1338,6 +1385,14 @@ function convertResource(path: string, resource: any, paths: any, parentPath: st
     paths[fullPath] = {};
   }
   
+  // Add path-level summary and description if available
+  if (resource.displayName) {
+    paths[fullPath].summary = resource.displayName;
+  }
+  if (resource.description) {
+    paths[fullPath].description = resource.description;
+  }
+  
   // Extract URI parameters from path (like /{id} or /{userId})
   const pathParams: any = {};
   const pathParamMatches = fullPath.matchAll(/\{([^}]+)\}/g);
@@ -1359,7 +1414,7 @@ function convertResource(path: string, resource: any, paths: any, parentPath: st
   
   for (const method of httpMethods) {
     if (resource[method]) {
-      paths[fullPath][method] = convertMethod(resource[method], method, traits, pathParams);
+      paths[fullPath][method] = convertMethod(resource[method], method, fullPath, traits, pathParams);
     }
   }
 
@@ -1374,7 +1429,7 @@ function convertResource(path: string, resource: any, paths: any, parentPath: st
 /**
  * Convert RAML method to OAS operation
  */
-function convertMethod(methodData: any, methodName?: string, traits?: any, pathParams?: any): any {
+function convertMethod(methodData: any, methodName?: string, resourcePath?: string, traits?: any, pathParams?: any): any {
   // Apply traits if the method uses them (is: [trait1, trait2])
   if (methodData.is && Array.isArray(methodData.is) && traits) {
     for (const traitName of methodData.is) {
@@ -1385,10 +1440,35 @@ function convertMethod(methodData: any, methodName?: string, traits?: any, pathP
     }
   }
 
+  // Generate operationId from method name and resource path
+  let operationId = '';
+  if (methodName && resourcePath) {
+    // Convert path like /users/{id} to getUsersById
+    const pathParts = resourcePath
+      .split('/')
+      .filter(part => part && !part.startsWith('{'))
+      .map(part => part.charAt(0).toUpperCase() + part.slice(1));
+    
+    // Add parameter names from path like {id} -> ById
+    const paramParts = resourcePath
+      .match(/\{([^}]+)\}/g)
+      ?.map(param => {
+        const paramName = param.replace(/[{}]/g, '');
+        return 'By' + paramName.charAt(0).toUpperCase() + paramName.slice(1);
+      }) || [];
+    
+    operationId = methodName + pathParts.join('') + paramParts.join('');
+  }
+
   const operation: any = {
     summary: methodData.displayName || methodData.description || (methodName ? methodName.toUpperCase() : 'Operation'),
     description: methodData.description || '',
     responses: {},
+  };
+
+  // Add operationId if generated
+  if (operationId) {
+    operation.operationId = operationId;
   };
 
   // Add path parameters first
@@ -1514,14 +1594,46 @@ function convertDataType(typeData: any): any {
             const itemType = t.slice(0, -2).trim();
             return {
               type: 'array',
-              items: { type: mapRamlTypeToOasType(itemType) }
+              items: { type: mapRamlTypeToOasType(itemType), deprecated: false, nullable: true },
+              deprecated: false,
+              nullable: true,
+              minItems: 0,
+              maxItems: 100
             };
           }
-          return { type: mapRamlTypeToOasType(t) };
+          const mappedType = mapRamlTypeToOasType(t);
+          const schema: any = { 
+            type: mappedType,
+            deprecated: false,
+            nullable: true
+          };
+          // Add string defaults
+          if (mappedType === 'string') {
+            schema.minLength = 0;
+            schema.maxLength = 255;
+          }
+          return schema;
         })
       };
     }
-    return { type: mapRamlTypeToOasType(typeData) };
+    const mappedType = mapRamlTypeToOasType(typeData);
+    const schema: any = { 
+      type: mappedType,
+      deprecated: false,
+      nullable: true
+    };
+    // Add string defaults
+    if (mappedType === 'string') {
+      schema.minLength = 0;
+      schema.maxLength = 255;
+    }
+    // Add array defaults
+    if (mappedType === 'array') {
+      schema.minItems = 0;
+      schema.maxItems = 100;
+      schema.items = { type: 'string', deprecated: false, nullable: true };
+    }
+    return schema;
   }
 
   const schema: any = {};
@@ -1536,10 +1648,25 @@ function convertDataType(typeData: any): any {
           const itemType = t.slice(0, -2).trim();
           return {
             type: 'array',
-            items: { type: mapRamlTypeToOasType(itemType) }
+            items: { type: mapRamlTypeToOasType(itemType), deprecated: false, nullable: true },
+            deprecated: false,
+            nullable: true,
+            minItems: 0,
+            maxItems: 100
           };
         }
-        return { type: mapRamlTypeToOasType(t) };
+        const mappedType = mapRamlTypeToOasType(t);
+        const unionSchema: any = { 
+          type: mappedType,
+          deprecated: false,
+          nullable: true
+        };
+        // Add string defaults
+        if (mappedType === 'string') {
+          unionSchema.minLength = 0;
+          unionSchema.maxLength = 255;
+        }
+        return unionSchema;
       });
       
       // Don't set schema.type when using oneOf
@@ -1558,6 +1685,12 @@ function convertDataType(typeData: any): any {
   }
 
   if (typeData.description) schema.description = typeData.description;
+  
+  // Add deprecated property (default to false)
+  schema.deprecated = typeData.deprecated || false;
+  
+  // Add nullable property based on required field (if not required, it's nullable)
+  schema.nullable = typeData.required === false || typeData.required === undefined;
   
   if (typeData.properties) {
     schema.properties = {};
@@ -1583,8 +1716,26 @@ function convertDataType(typeData: any): any {
 
   if (typeData.enum) schema.enum = typeData.enum;
   if (typeData.pattern) schema.pattern = typeData.pattern;
-  if (typeData.minLength !== undefined) schema.minLength = typeData.minLength;
-  if (typeData.maxLength !== undefined) schema.maxLength = typeData.maxLength;
+  
+  // String type enhancements
+  if (schema.type === 'string') {
+    schema.minLength = typeData.minLength !== undefined ? typeData.minLength : 0;
+    schema.maxLength = typeData.maxLength !== undefined ? typeData.maxLength : 255;
+  } else {
+    if (typeData.minLength !== undefined) schema.minLength = typeData.minLength;
+    if (typeData.maxLength !== undefined) schema.maxLength = typeData.maxLength;
+  }
+  
+  // Array type enhancements - ONLY add to arrays
+  if (schema.type === 'array') {
+    schema.minItems = typeData.minItems !== undefined ? typeData.minItems : 0;
+    schema.maxItems = typeData.maxItems !== undefined ? typeData.maxItems : 100;
+    // Ensure items property exists
+    if (!schema.items) {
+      schema.items = { type: 'string', deprecated: false, nullable: true };
+    }
+  }
+  
   if (typeData.minimum !== undefined) schema.minimum = typeData.minimum;
   if (typeData.maximum !== undefined) schema.maximum = typeData.maximum;
   if (typeData.default !== undefined) schema.default = typeData.default;
