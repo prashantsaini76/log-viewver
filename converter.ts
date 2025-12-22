@@ -39,7 +39,7 @@ export async function convertRamlToOas(
     }
 
     // Then, resolve libraries referenced with 'uses:' (AFTER includes are resolved)
-    const libraryResolvedContent = resolveLibraries(resolvedContent, files, mainRamlFile);
+    const { content: libraryResolvedContent, libraries } = resolveLibraries(resolvedContent, files, mainRamlFile);
 
     // Parse the resolved RAML as YAML
     let ramlData;
@@ -60,8 +60,8 @@ export async function convertRamlToOas(
       throw new Error('Invalid RAML format');
     }
 
-    // Resolve traits and apply them to methods
-    ramlData = resolveTraits(ramlData);
+    // Resolve traits and apply them to methods (pass libraries for namespaced traits)
+    ramlData = resolveTraits(ramlData, libraries);
 
     // Convert RAML to OpenAPI
     const oasSpec = convertRamlToOasSpec(ramlData);
@@ -100,8 +100,9 @@ export async function convertRamlToOas(
 
 /**
  * Resolve library imports (uses: keyword)
+ * Returns an object with the resolved content and the libraries
  */
-function resolveLibraries(content: string, files: FileMap, currentFile: string): string {
+function resolveLibraries(content: string, files: FileMap, currentFile: string): { content: string; libraries: { [key: string]: any } } {
   const lines = content.split('\n');
   let inUsesBlock = false;
   let usesIndent = 0;
@@ -285,7 +286,7 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
     }
   }
   
-  return cleanedLines.join('\n');
+  return { content: cleanedLines.join('\n'), libraries };
 }
 
 /**
@@ -314,7 +315,12 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
   const result: string[] = [];
   
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    let line = lines[i];
+    
+    // Remove carriage return if present (Windows line endings)
+    if (line.endsWith('\r')) {
+      line = line.slice(0, -1);
+    }
     
     // Pattern 1: "key: !include file.raml"
     const includeAfterColon = line.match(/^(\s*)(.+?):\s*!include\s+(.+)$/);
@@ -326,10 +332,16 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
       const [, indent, key, includePath] = includeAfterColon;
       const fileContent = getIncludedContent(includePath.trim(), files, currentFile);
       
-      if (!fileContent) {
+      if (fileContent === null) {
         const errorMsg = `Failed to resolve !include at line ${i + 1} in file: ${currentFile}\n  Include path: ${includePath.trim()}`;
         console.error(errorMsg);
         throw new Error(errorMsg);
+      }
+      
+      // If empty string (skipped documentation), replace with placeholder text
+      if (fileContent === '') {
+        result.push(`${indent}${key}: "Documentation content skipped"`);
+        continue;
       }
       
       // Add the key with proper indentation
@@ -348,10 +360,16 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
       const [, indent, includePath] = includeAsValue;
       const fileContent = getIncludedContent(includePath.trim(), files, currentFile);
       
-      if (!fileContent) {
+      if (fileContent === null) {
         const errorMsg = `Failed to resolve !include at line ${i + 1} in file: ${currentFile}\n  Include path: ${includePath.trim()}`;
         console.error(errorMsg);
         throw new Error(errorMsg);
+      }
+      
+      // If empty string (skipped documentation), use placeholder
+      if (fileContent === '') {
+        result.push(`${indent}"Documentation content skipped"`);
+        continue;
       }
       
       // Replace the !include line with the content (maintaining indentation)
@@ -375,6 +393,17 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
  * Get included file content and resolve nested includes
  */
 function getIncludedContent(includePath: string, files: FileMap, currentFile: string): string | null {
+  // Skip documentation folders
+  const docFolderPatterns = ['/doc/', '/docs/', '/documentation/', 'doc/', 'docs/', 'documentation/'];
+  const shouldSkipDoc = docFolderPatterns.some(pattern => 
+    includePath.includes(pattern) || currentFile.includes(pattern)
+  );
+  
+  if (shouldSkipDoc) {
+    console.log(`  Skipping documentation file: ${includePath}`);
+    return ''; // Return empty string instead of null to avoid errors
+  }
+  
   // Get the directory of the current file
   const currentDir = currentFile.split('/').slice(0, -1).join('/');
   
@@ -448,16 +477,18 @@ function getIncludedContent(includePath: string, files: FileMap, currentFile: st
   const contentLines = fileContent.split('\n');
   let startIndex = 0;
   
-  // Skip RAML version header and declarations
+  // Skip RAML version header (e.g., "#%RAML 1.0 Trait")
   for (let j = 0; j < contentLines.length; j++) {
     const contentLine = contentLines[j].trim();
     if (contentLine.startsWith('#%RAML')) {
       startIndex = j + 1;
-      continue;
+      break; // Only skip the RAML header line
     }
-    if (contentLine && !contentLine.startsWith('#')) {
-      break;
-    }
+  }
+  
+  // Also skip any leading empty lines after the header
+  while (startIndex < contentLines.length && !contentLines[startIndex].trim()) {
+    startIndex++;
   }
   
   return contentLines.slice(startIndex).join('\n');
@@ -465,8 +496,9 @@ function getIncludedContent(includePath: string, files: FileMap, currentFile: st
 
 /**
  * Resolve traits (is: keyword) and merge into methods
+ * Also merges traits from libraries (e.g., ct.TraitName)
  */
-function resolveTraits(ramlData: any): any {
+function resolveTraits(ramlData: any, libraries: { [key: string]: any } = {}): any {
   const traits: { [key: string]: any } = {};
   
   if (process.env.NODE_ENV !== 'production') {
@@ -488,6 +520,22 @@ function resolveTraits(ramlData: any): any {
     
     if (process.env.NODE_ENV !== 'production') {
       console.log('  Found traits:', Object.keys(traits));
+    }
+  }
+  
+  // Extract traits from libraries (e.g., ct.TraitName)
+  for (const libName in libraries) {
+    const libData = libraries[libName];
+    if (libData.traits) {
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`  Found traits in library ${libName}:`, Object.keys(libData.traits));
+      }
+      
+      // Add library traits with namespaced keys (e.g., ct.ReturnsSuccess)
+      for (const traitName in libData.traits) {
+        const namespacedKey = `${libName}.${traitName}`;
+        traits[namespacedKey] = libData.traits[traitName];
+      }
     }
   }
   
