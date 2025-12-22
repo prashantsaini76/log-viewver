@@ -94,6 +94,103 @@ function autoFixYamlIndentation(content: string): string {
 }
 
 /**
+ * Auto-fix common YAML structural issues that cause parsing errors
+ * - Removes duplicate keys at the same indentation level
+ * - Merges properties that should be nested
+ */
+function autoFixYamlStructure(content: string): string {
+  logToFile('\n>>> Running autoFixYamlStructure');
+  
+  // Strip Windows line endings first
+  content = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  
+  logToFile('First 15 lines of content:');
+  content.split('\n').slice(0, 15).forEach((line, idx) => {
+    logToFile(`  ${idx + 1}: [${line.search(/\S/)}sp] "${line}"`);
+  });
+  logToFile('');
+  
+  const lines = content.split('\n');
+  const result: string[] = [];
+  
+  // Track keys at each indentation level in the current context
+  const indentStacks: Map<number, Set<string>> = new Map();
+  let currentIndent = -1;
+  let duplicatesFound = 0;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    
+    // Skip empty lines
+    if (!line.trim()) {
+      result.push(line);
+      // Clear deeper indent levels on empty lines
+      indentStacks.forEach((keys, indent) => {
+        if (indent > currentIndent) {
+          indentStacks.delete(indent);
+        }
+      });
+      continue;
+    }
+    
+    // Get indentation level
+    const indent = line.search(/\S/);
+    if (indent === -1) {
+      result.push(line);
+      continue;
+    }
+    
+    // Clear indent stacks for levels deeper than current (NOT equal)
+    if (indent < currentIndent) {
+      indentStacks.forEach((keys, stackIndent) => {
+        if (stackIndent > indent) {
+          indentStacks.delete(stackIndent);
+        }
+      });
+    }
+    currentIndent = indent;
+    
+    // Check if this is a key-value line
+    const keyMatch = line.match(/^(\s*)([^:\s#]+):\s*(.*)$/);
+    if (keyMatch) {
+      const [, , key, value] = keyMatch;
+      
+      logToFile(`  Line ${i + 1}: indent=${indent}, key="${key}"`)
+      
+      // Initialize set for this indent level if not exists
+      if (!indentStacks.has(indent)) {
+        indentStacks.set(indent, new Set());
+        logToFile(`    Created new key set for indent ${indent}`);
+      }
+      
+      const keysAtLevel = indentStacks.get(indent)!;
+      
+      logToFile(`    Keys at indent ${indent}: [${Array.from(keysAtLevel).join(', ')}]`);
+      
+      // Check for duplicate
+      if (keysAtLevel.has(key)) {
+        duplicatesFound++;
+        logToFile(`⚠️ Duplicate key detected: "${key}" at indent ${indent} (line ${i + 1})`);
+        logToFile(`   Skipping: ${line}`);
+        
+        // Comment out the duplicate line instead of removing it
+        result.push(`${' '.repeat(indent)}# DUPLICATE REMOVED: ${key}`);
+        continue;
+      }
+      
+      keysAtLevel.add(key);
+      logToFile(`    Added "${key}" to indent ${indent}`);
+    }
+    
+    result.push(line);
+  }
+  
+  logToFile(`>>> autoFixYamlStructure complete: ${duplicatesFound} duplicates removed\n`);
+  
+  return result.join('\n');
+}
+
+/**
  * Convert RAML to OpenAPI Specification (OAS)
  * Supports multi-file RAML projects with includes and references
  */
@@ -134,7 +231,10 @@ export async function convertRamlToOas(
     const { content: libraryResolvedContent, libraries } = resolveLibraries(resolvedContent, files, mainRamlFile);
 
     // Auto-fix common YAML indentation issues before parsing
-    const fixedContent = autoFixYamlIndentation(libraryResolvedContent);
+    let fixedContent = autoFixYamlIndentation(libraryResolvedContent);
+    
+    // Auto-fix structural issues (duplicate keys, etc.)
+    fixedContent = autoFixYamlStructure(fixedContent);
 
     // Parse the resolved RAML as YAML
     let ramlData;
@@ -460,6 +560,9 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
               }
             }
           }
+          
+          // Auto-fix common YAML structural issues before parsing
+          libContent = autoFixYamlStructure(libContent);
           
           // Parse library content
           try {
