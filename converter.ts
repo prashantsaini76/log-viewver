@@ -711,6 +711,21 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
           const lineIndent = contentLine.search(/\S/);
           const relativeIndent = Math.max(0, lineIndent - baseIndentOfIncludedFile);
           const newIndent = additionalIndent + ' '.repeat(relativeIndent);
+          
+          // Debug: Log if we're about to add a line with suspicious indentation
+          if (newIndent.length < 2 && result.length > 10) {
+            console.error(`⚠️ WARNING: About to add line with ${newIndent.length} spaces at result line ${result.length + 1}`);
+            console.error(`   Content: "${contentLine.trim()}"`);
+            console.error(`   Include key: "${key}", path: ${includePath.trim()}`);
+            console.error(`   Base indent: "${indent}" (${indent.length} chars)`);
+            console.error(`   Additional indent: "${additionalIndent}" (${additionalIndent.length} chars)`);
+            console.error(`   Relative indent: ${relativeIndent}`);
+            console.error(`   Previous 3 lines:`);
+            result.slice(-3).forEach((line, idx) => {
+              console.error(`     ${result.length - 2 + idx}: [${line.search(/\S/)}sp] ${line}`);
+            });
+          }
+          
           result.push(newIndent + contentLine.trim());
         } else {
           result.push(contentLine);
@@ -748,6 +763,20 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
           const lineIndent = contentLine.search(/\S/);
           const relativeIndent = Math.max(0, lineIndent - baseIndentOfIncludedFile);
           const newIndent = indent + ' '.repeat(relativeIndent);
+          
+          // Debug: Log if we're about to add a line with suspicious indentation
+          if (newIndent.length < 2 && result.length > 10) {
+            console.error(`⚠️ WARNING: About to add line with ${newIndent.length} spaces at result line ${result.length + 1}`);
+            console.error(`   Content: "${contentLine.trim()}"`);
+            console.error(`   Include path: ${includePath.trim()}`);
+            console.error(`   Base indent: "${indent}" (${indent.length} chars)`);
+            console.error(`   Relative indent: ${relativeIndent}`);
+            console.error(`   Previous 3 lines:`);
+            result.slice(-3).forEach((line, idx) => {
+              console.error(`     ${result.length - 2 + idx}: [${line.search(/\S/)}sp] ${line}`);
+            });
+          }
+          
           result.push(newIndent + contentLine.trim());
         } else {
           result.push(contentLine);
