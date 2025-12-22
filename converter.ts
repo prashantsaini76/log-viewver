@@ -441,6 +441,8 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
             const errorMsg = `Failed to parse library ${libName} from ${libPath} in file: ${currentFile}`;
             console.error(errorMsg);
             
+            let errorContext = '';
+            
             // Add more context about the error
             if (e instanceof Error) {
               console.error('YAML Parse Error:', e.message);
@@ -489,6 +491,16 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
               });
               console.error('=== END FULL LIBRARY CONTENT ===\n');
               
+              // Also return the problematic content in the error message for easier debugging
+              const contextLines = errorLineNum >= 0 
+                ? lines.slice(Math.max(0, errorLineNum - 5), Math.min(lines.length, errorLineNum + 5))
+                : lines.slice(0, 10);
+              errorContext = '\nContext:\n' + contextLines.map((line, idx) => {
+                const actualLineNum = errorLineNum >= 0 ? Math.max(0, errorLineNum - 5) + idx + 1 : idx + 1;
+                const spaces = line.search(/\S/) === -1 ? 0 : line.search(/\S/);
+                return `${actualLineNum} [${spaces}sp] | ${line}`;
+              }).join('\n');
+              
               if (e.message.includes('unknown tag')) {
                 console.error('\n💡 Tip: This library may contain unresolved !include directives or RAML-specific syntax.');
               }
@@ -497,7 +509,8 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
               }
             }
             
-            throw new Error(`${errorMsg}\nOriginal error: ${e instanceof Error ? e.message : String(e)}`);
+            // Create a more informative error message that includes the context
+            throw new Error(`${errorMsg}\nOriginal error: ${e instanceof Error ? e.message : String(e)}${errorContext}`);
           }
         } else {
           const errorMsg = `Library file not found: ${libName} at path ${libPath} (referenced in file: ${currentFile})`;
