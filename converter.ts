@@ -99,6 +99,82 @@ export async function convertRamlToOas(
 }
 
 /**
+ * Resolve local type references within a library's types collection
+ * E.g., if UserLogDetlPostReq references another type in the same library
+ */
+function resolveLocalTypeReferences(types: any, maxDepth = 5): any {
+  if (!types || maxDepth <= 0) return types;
+  
+  const resolved: any = {};
+  
+  // First, copy all types as-is
+  for (const typeName in types) {
+    resolved[typeName] = types[typeName];
+  }
+  
+  // Then, recursively resolve type references
+  for (const typeName in resolved) {
+    resolved[typeName] = resolveTypeInObject(resolved[typeName], types, maxDepth - 1);
+  }
+  
+  return resolved;
+}
+
+/**
+ * Recursively resolve type references in an object
+ */
+function resolveTypeInObject(obj: any, types: any, depth: number): any {
+  if (depth <= 0 || !obj || typeof obj !== 'object') {
+    return obj;
+  }
+  
+  // If this is a direct type reference (string), try to expand it
+  if (typeof obj === 'string' && types[obj]) {
+    return resolveTypeInObject(types[obj], types, depth - 1);
+  }
+  
+  // If obj has a 'type' property that references another type
+  if (obj.type && typeof obj.type === 'string' && types[obj.type]) {
+    // Expand the type reference
+    const expandedType = resolveTypeInObject(types[obj.type], types, depth - 1);
+    
+    // Merge expanded type with current properties
+    const result = { ...expandedType };
+    
+    // Keep other properties from the original object
+    for (const key in obj) {
+      if (key !== 'type') {
+        result[key] = obj[key];
+      }
+    }
+    
+    return result;
+  }
+  
+  // Recursively process nested objects
+  const result: any = Array.isArray(obj) ? [] : {};
+  
+  for (const key in obj) {
+    if (key === 'properties' && typeof obj[key] === 'object') {
+      // Recursively resolve types in properties
+      result[key] = {};
+      for (const propName in obj[key]) {
+        result[key][propName] = resolveTypeInObject(obj[key][propName], types, depth - 1);
+      }
+    } else if (key === 'items' && typeof obj[key] === 'object') {
+      // Recursively resolve types in array items
+      result[key] = resolveTypeInObject(obj[key], types, depth - 1);
+    } else if (typeof obj[key] === 'object') {
+      result[key] = resolveTypeInObject(obj[key], types, depth - 1);
+    } else {
+      result[key] = obj[key];
+    }
+  }
+  
+  return result;
+}
+
+/**
  * Resolve library imports (uses: keyword)
  * Returns an object with the resolved content and the libraries
  */
@@ -168,6 +244,12 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
           // Parse library content
           try {
             const libData = yaml.load(libContent) as any;
+            
+            // Resolve local type references within the library
+            if (libData.types) {
+              libData.types = resolveLocalTypeReferences(libData.types);
+            }
+            
             libraries[libName] = libData;
             
             if (process.env.NODE_ENV !== 'production') {
