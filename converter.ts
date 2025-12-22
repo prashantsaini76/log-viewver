@@ -390,7 +390,29 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
         if (libContent) {
           // Resolve includes in library
           if (libContent.includes('!include')) {
-            libContent = resolveIncludes(libContent, files, resolvedPath);
+            try {
+              libContent = resolveIncludes(libContent, files, resolvedPath);
+            } catch (includeError) {
+              const errorMsg = `Failed to resolve includes in library ${libName} from ${libPath}: ${includeError instanceof Error ? includeError.message : 'Unknown error'}`;
+              console.error(errorMsg);
+              throw new Error(errorMsg);
+            }
+          }
+          
+          // Check for circular reference in uses: block
+          if (libContent.includes('uses:')) {
+            const usesMatch = libContent.match(/uses:\s*\n\s+(\w+):\s*(.+)/);
+            if (usesMatch) {
+              const subLibPath = usesMatch[2].split('#')[0].trim();
+              // Check if the library is trying to import itself (circular reference)
+              if (subLibPath === libPath || resolvedPath.endsWith(subLibPath)) {
+                if (process.env.NODE_ENV !== 'production') {
+                  console.warn(`    ⚠️  Circular reference detected: ${libPath} is trying to import itself. Removing uses: block.`);
+                }
+                // Remove the uses: block to prevent circular reference
+                libContent = libContent.replace(/uses:\s*\n(\s+\w+:\s*.+\n?)+/g, '');
+              }
+            }
           }
           
           // Parse library content
@@ -410,6 +432,18 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
           } catch (e) {
             const errorMsg = `Failed to parse library ${libName} from ${libPath} in file: ${currentFile}`;
             console.error(errorMsg, e);
+            
+            // Add more context about the error
+            if (e instanceof Error) {
+              console.error('Error details:', e.message);
+              if (e.message.includes('unknown tag')) {
+                console.error('\n💡 Tip: This library may contain unresolved !include directives or RAML-specific syntax.');
+              }
+              if (libContent.includes('uses:')) {
+                console.error('\n💡 Tip: This library has a "uses:" block - it may be importing other libraries that need to be resolved first.');
+              }
+            }
+            
             throw new Error(errorMsg);
           }
         } else {
