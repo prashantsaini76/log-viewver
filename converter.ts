@@ -10,6 +10,60 @@ export interface ConversionResult {
 }
 
 /**
+ * Auto-fix common YAML indentation issues
+ * This reduces user overhead by automatically correcting indentation problems
+ */
+function autoFixYamlIndentation(content: string): string {
+  const lines = content.split('\n');
+  const fixedLines: string[] = [];
+  let fixCount = 0;
+  const fixedIssues: string[] = [];
+  
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i];
+    const originalLine = line;
+    
+    // Skip empty lines and comments
+    if (!line.trim() || line.trim().startsWith('#')) {
+      fixedLines.push(line);
+      continue;
+    }
+    
+    // Fix 1: Convert tabs to spaces (most common issue)
+    if (line.includes('\t')) {
+      line = line.replace(/\t/g, '  ');
+      fixCount++;
+      fixedIssues.push(`Line ${i + 1}: Converted tabs to spaces`);
+    }
+    
+    // Fix 2: Fix odd-numbered indentation (normalize to even spaces)
+    const leadingSpaces = line.match(/^( +)/)?.[1]?.length || 0;
+    if (leadingSpaces > 0 && leadingSpaces % 2 !== 0) {
+      // Round up to next even number
+      const normalizedIndent = Math.ceil(leadingSpaces / 2) * 2;
+      const content = line.trim();
+      line = ' '.repeat(normalizedIndent) + content;
+      fixCount++;
+      fixedIssues.push(`Line ${i + 1}: Fixed odd indentation (${leadingSpaces} → ${normalizedIndent} spaces)`);
+    }
+    
+    fixedLines.push(line);
+  }
+  
+  // Log fixes if any were made
+  if (fixCount > 0 && process.env.NODE_ENV !== 'production') {
+    console.log(`\n✨ Auto-fixed ${fixCount} indentation issue(s):`);
+    fixedIssues.slice(0, 10).forEach(issue => console.log(`   ${issue}`));
+    if (fixedIssues.length > 10) {
+      console.log(`   ... and ${fixedIssues.length - 10} more`);
+    }
+    console.log('');
+  }
+  
+  return fixedLines.join('\n');
+}
+
+/**
  * Convert RAML to OpenAPI Specification (OAS)
  * Supports multi-file RAML projects with includes and references
  */
@@ -41,19 +95,87 @@ export async function convertRamlToOas(
     // Then, resolve libraries referenced with 'uses:' (AFTER includes are resolved)
     const { content: libraryResolvedContent, libraries } = resolveLibraries(resolvedContent, files, mainRamlFile);
 
+    // Auto-fix common YAML indentation issues before parsing
+    const fixedContent = autoFixYamlIndentation(libraryResolvedContent);
+
     // Parse the resolved RAML as YAML
     let ramlData;
     try {
-      ramlData = yaml.load(libraryResolvedContent) as any;
-    } catch (yamlError) {
-      // If YAML parsing fails, check if there are any unresolved !include directives
-      const unresolvedIncludes = libraryResolvedContent.match(/!include\s+[^\n]+/g);
+      ramlData = yaml.load(fixedContent) as any;
+    } catch (yamlError: any) {
+      // Enhanced error reporting for YAML parsing issues
+      const errorMsg = yamlError instanceof Error ? yamlError.message : 'Unknown error';
+      const errorReason = yamlError.reason || '';
+      
+      // Save the problematic content for debugging (Node.js only)
+      let debugFilePath = '';
+      try {
+        if (typeof process !== 'undefined' && process.versions && process.versions.node) {
+          // We're in Node.js
+          const fs = require('fs');
+          debugFilePath = 'raml-debug-output.yaml';
+          fs.writeFileSync(debugFilePath, fixedContent, 'utf-8');
+          console.log(`\n⚠️  Debug: Saved problematic content to ${debugFilePath} for inspection\n`);
+        }
+      } catch (e) {
+        // Ignore file write errors
+      }
+      
+      // Check if there are unresolved !include directives
+      const unresolvedIncludes = fixedContent.match(/!include\s+[^\n]+/g);
       if (unresolvedIncludes) {
         throw new Error(
-          `YAML parsing failed. Found unresolved !include directives:\n${unresolvedIncludes.join('\n')}\n\nOriginal error: ${yamlError instanceof Error ? yamlError.message : 'Unknown error'}`
+          `YAML parsing failed. Found unresolved !include directives:\n${unresolvedIncludes.join('\n')}\n\nOriginal error: ${errorMsg}`
         );
       }
-      throw yamlError;
+      
+      // Try to find the problematic section by parsing the error line number
+      let problematicContent = '';
+      if (yamlError.mark && yamlError.mark.line !== undefined) {
+        const errorLine = yamlError.mark.line;
+        const lines = fixedContent.split('\n');
+        
+        // Show context around the error
+        const contextStart = Math.max(0, errorLine - 5);
+        const contextEnd = Math.min(lines.length, errorLine + 5);
+        const contextLines = [];
+        
+        for (let i = contextStart; i < contextEnd; i++) {
+          const lineNum = i + 1;
+          const prefix = lineNum === errorLine + 1 ? '>>> ' : '    ';
+          contextLines.push(`${prefix}${lineNum}: ${lines[i]}`);
+        }
+        
+        problematicContent = '\n\nContext around error:\n' + contextLines.join('\n');
+      }
+      
+      // Enhanced error message
+      const debugFileInfo = debugFilePath ? `\n- Review the file: ${debugFilePath} (saved in your project root)` : '';
+      const enhancedError = `YAML Indentation Error in ${mainRamlFile}
+
+${errorReason ? `Reason: ${errorReason}` : ''}
+
+⚠️  Note: Auto-fix attempted but couldn't resolve this issue automatically.
+
+This error typically means:
+1. Inconsistent indentation (mixing spaces and tabs)
+2. Wrong number of spaces for nested properties
+3. Missing or extra spaces before property names
+4. Quoted strings with special characters not properly escaped
+5. Example values with special characters (like "300001Type") need proper quotes
+
+${problematicContent}
+
+Full error: ${errorMsg}
+
+💡 Tips to fix:
+- Check that all indentation uses spaces (not tabs)
+- Verify nested properties are indented by exactly 2 spaces
+- Look for properties with colons in values - they may need quotes
+- Check 'example:' values - strings should be in quotes: example: "value"${debugFileInfo}
+- Use a YAML validator: https://www.yamllint.com/`;
+      
+      throw new Error(enhancedError);
     }
 
     if (!ramlData || typeof ramlData !== 'object') {
@@ -212,7 +334,9 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
       }
       
       if (trimmed && trimmed.includes(':')) {
-        const [libName, libPath] = trimmed.split(':').map(s => s.trim());
+        // Remove inline comments (everything after #)
+        const lineWithoutComment = trimmed.split('#')[0].trim();
+        const [libName, libPath] = lineWithoutComment.split(':').map(s => s.trim());
         
         if (process.env.NODE_ENV !== 'production') {
           console.log(`  Library found: ${libName} -> ${libPath}`);
