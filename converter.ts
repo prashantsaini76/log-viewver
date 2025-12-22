@@ -629,10 +629,24 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
       result.push(`${indent}${key}:`);
       
       // Add included content with additional indentation
-      const additionalIndent = indent + '  ';
-      for (const contentLine of fileContent.split('\n')) {
+      // Calculate the base indentation of the included file (from first non-empty line)
+      const contentLines = fileContent.split('\n');
+      let baseIndentOfIncludedFile = 0;
+      for (const contentLine of contentLines) {
         if (contentLine.trim()) {
-          result.push(additionalIndent + contentLine);
+          baseIndentOfIncludedFile = contentLine.search(/\S/);
+          break;
+        }
+      }
+      
+      const additionalIndent = indent + '  ';
+      for (const contentLine of contentLines) {
+        if (contentLine.trim()) {
+          // Remove the base indentation from the included file and add our indentation
+          const lineIndent = contentLine.search(/\S/);
+          const relativeIndent = Math.max(0, lineIndent - baseIndentOfIncludedFile);
+          const newIndent = additionalIndent + ' '.repeat(relativeIndent);
+          result.push(newIndent + contentLine.trim());
         } else {
           result.push(contentLine);
         }
@@ -653,10 +667,23 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
         continue;
       }
       
-      // Replace the !include line with the content (maintaining indentation)
-      for (const contentLine of fileContent.split('\n')) {
+      // Replace the !include line with the content (maintaining relative indentation)
+      const contentLines = fileContent.split('\n');
+      let baseIndentOfIncludedFile = 0;
+      for (const contentLine of contentLines) {
         if (contentLine.trim()) {
-          result.push(indent + contentLine);
+          baseIndentOfIncludedFile = contentLine.search(/\S/);
+          break;
+        }
+      }
+      
+      for (const contentLine of contentLines) {
+        if (contentLine.trim()) {
+          // Remove the base indentation from the included file and add our indentation
+          const lineIndent = contentLine.search(/\S/);
+          const relativeIndent = Math.max(0, lineIndent - baseIndentOfIncludedFile);
+          const newIndent = indent + ' '.repeat(relativeIndent);
+          result.push(newIndent + contentLine.trim());
         } else {
           result.push(contentLine);
         }
