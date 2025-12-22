@@ -1,4 +1,6 @@
 import * as yaml from 'js-yaml';
+import * as fs from 'fs';
+import * as path from 'path';
 
 interface FileMap {
   [path: string]: string;
@@ -7,6 +9,34 @@ interface FileMap {
 export interface ConversionResult {
   oas: any;
   yaml: string;
+}
+
+// Logger utility
+function logToFile(message: string) {
+  try {
+    const logsDir = path.join(process.cwd(), 'logs');
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+    const logFile = path.join(logsDir, 'converter-debug.log');
+    const timestamp = new Date().toISOString();
+    fs.appendFileSync(logFile, `[${timestamp}] ${message}\n`);
+  } catch (e) {
+    console.error('Failed to write to log file:', e);
+  }
+}
+
+function clearLogFile() {
+  try {
+    const logsDir = path.join(process.cwd(), 'logs');
+    if (!fs.existsSync(logsDir)) {
+      fs.mkdirSync(logsDir, { recursive: true });
+    }
+    const logFile = path.join(logsDir, 'converter-debug.log');
+    fs.writeFileSync(logFile, `=== Conversion started at ${new Date().toISOString()} ===\n\n`);
+  } catch (e) {
+    console.error('Failed to clear log file:', e);
+  }
 }
 
 /**
@@ -72,6 +102,14 @@ export async function convertRamlToOas(
   mainRamlFile: string
 ): Promise<ConversionResult> {
   try {
+    // Clear and initialize log file
+    clearLogFile();
+    logToFile('======================');
+    logToFile('Starting RAML to OAS conversion');
+    logToFile(`Main RAML file: ${mainRamlFile}`);
+    logToFile(`Total files in archive: ${Object.keys(files).length}`);
+    logToFile('======================\n');
+    
     // Get the main RAML content
     const mainRamlContent = files[mainRamlFile];
     if (!mainRamlContent) {
@@ -482,14 +520,18 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
               
               // Show FULL content with indentation markers
               console.error(`\n\n=== FULL LIBRARY CONTENT (${lines.length} lines) ===`);
+              logToFile(`\n\n=== FULL LIBRARY CONTENT FOR ${libName} (${lines.length} lines) ===`);
               lines.forEach((line, idx) => {
                 const lineNum = idx + 1;
                 const isErrorLine = (idx === errorLineNum);
                 const marker = isErrorLine ? ' <-- ERROR' : '';
                 const spaces = line.search(/\S/) === -1 ? 0 : line.search(/\S/);
-                console.error(`${lineNum.toString().padStart(3)} [${spaces.toString().padStart(2)}sp] | ${line}${marker}`);
+                const logLine = `${lineNum.toString().padStart(3)} [${spaces.toString().padStart(2)}sp] | ${line}${marker}`;
+                console.error(logLine);
+                logToFile(logLine);
               });
               console.error('=== END FULL LIBRARY CONTENT ===\n');
+              logToFile('=== END FULL LIBRARY CONTENT ===\n');
               
               // Also return the problematic content in the error message for easier debugging
               const contextLines = errorLineNum >= 0 
@@ -714,23 +756,33 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
           
           // Debug: Log if we're about to add a line with suspicious indentation
           if (newIndent.length === 0) {
-            console.error(`⚠️ WARNING: About to add line with 0 spaces at result line ${result.length + 1}`);
-            console.error(`   Content: "${contentLine.trim()}"`);
-            console.error(`   Include key: "${key}", path: ${includePath.trim()}`);
-            console.error(`   Base indent: "${indent}" (${indent.length} chars)`);
-            console.error(`   Additional indent: "${additionalIndent}" (${additionalIndent.length} chars)`);
-            console.error(`   Relative indent: ${relativeIndent}`);
-            console.error(`   Line from included file had ${lineIndent} spaces`);
-            console.error(`   Base indent of included file: ${baseIndentOfIncludedFile}`);
-            console.error(`   Result has ${result.length} lines so far`);
-            console.error(`   Previous 5 lines:`);
+            const warningMsg = [
+              `⚠️ WARNING: About to add line with 0 spaces at result line ${result.length + 1}`,
+              `   Content: "${contentLine.trim()}"`,
+              `   Include key: "${key}", path: ${includePath.trim()}`,
+              `   Base indent: "${indent}" (${indent.length} chars)`,
+              `   Additional indent: "${additionalIndent}" (${additionalIndent.length} chars)`,
+              `   Relative indent: ${relativeIndent}`,
+              `   Line from included file had ${lineIndent} spaces`,
+              `   Base indent of included file: ${baseIndentOfIncludedFile}`,
+              `   Result has ${result.length} lines so far`,
+              `   Previous 5 lines:`
+            ].join('\n');
+            
+            console.error(warningMsg);
+            logToFile(warningMsg);
+            
             result.slice(-5).forEach((line, idx) => {
               const spaces = line.search(/\S/) === -1 ? 0 : line.search(/\S/);
-              console.error(`     ${result.length - 4 + idx}: [${spaces}sp] ${line}`);
+              const lineMsg = `     ${result.length - 4 + idx}: [${spaces}sp] ${line}`;
+              console.error(lineMsg);
+              logToFile(lineMsg);
             });
             
             // FORCE a minimum indentation to prevent YAML errors
-            console.error(`   🔧 FIXING: Forcing minimum 2 spaces indentation`);
+            const fixMsg = `   🔧 FIXING: Forcing minimum 2 spaces indentation`;
+            console.error(fixMsg);
+            logToFile(fixMsg);
           }
           
           // Safety fix: Never allow 0-indent lines deep in the file
@@ -776,22 +828,32 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
           
           // Debug: Log if we're about to add a line with suspicious indentation
           if (newIndent.length === 0) {
-            console.error(`⚠️ WARNING: About to add line with 0 spaces at result line ${result.length + 1}`);
-            console.error(`   Content: "${contentLine.trim()}"`);
-            console.error(`   Include path: ${includePath.trim()}`);
-            console.error(`   Base indent: "${indent}" (${indent.length} chars)`);
-            console.error(`   Relative indent: ${relativeIndent}`);
-            console.error(`   Line from included file had ${lineIndent} spaces`);
-            console.error(`   Base indent of included file: ${baseIndentOfIncludedFile}`);
-            console.error(`   Result has ${result.length} lines so far`);
-            console.error(`   Previous 5 lines:`);
+            const warningMsg = [
+              `⚠️ WARNING: About to add line with 0 spaces at result line ${result.length + 1}`,
+              `   Content: "${contentLine.trim()}"`,
+              `   Include path: ${includePath.trim()}`,
+              `   Base indent: "${indent}" (${indent.length} chars)`,
+              `   Relative indent: ${relativeIndent}`,
+              `   Line from included file had ${lineIndent} spaces`,
+              `   Base indent of included file: ${baseIndentOfIncludedFile}`,
+              `   Result has ${result.length} lines so far`,
+              `   Previous 5 lines:`
+            ].join('\n');
+            
+            console.error(warningMsg);
+            logToFile(warningMsg);
+            
             result.slice(-5).forEach((line, idx) => {
               const spaces = line.search(/\S/) === -1 ? 0 : line.search(/\S/);
-              console.error(`     ${result.length - 4 + idx}: [${spaces}sp] ${line}`);
+              const lineMsg = `     ${result.length - 4 + idx}: [${spaces}sp] ${line}`;
+              console.error(lineMsg);
+              logToFile(lineMsg);
             });
             
             // FORCE a minimum indentation to prevent YAML errors
-            console.error(`   🔧 FIXING: Forcing minimum 2 spaces indentation`);
+            const fixMsg = `   🔧 FIXING: Forcing minimum 2 spaces indentation`;
+            console.error(fixMsg);
+            logToFile(fixMsg);
           }
           
           // Safety fix: Never allow 0-indent lines deep in the file
