@@ -392,6 +392,14 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
           if (libContent.includes('!include')) {
             try {
               libContent = resolveIncludes(libContent, files, resolvedPath);
+              
+              // Debug: Save resolved library content for inspection
+              if (process.env.NODE_ENV !== 'production') {
+                console.log(`    Library ${libName} after resolving includes (first 30 lines):`);
+                libContent.split('\n').slice(0, 30).forEach((line, idx) => {
+                  console.log(`      ${idx + 1}: ${line}`);
+                });
+              }
             } catch (includeError) {
               const errorMsg = `Failed to resolve includes in library ${libName} from ${libPath}: ${includeError instanceof Error ? includeError.message : 'Unknown error'}`;
               console.error(errorMsg);
@@ -640,6 +648,18 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
       }
       
       const additionalIndent = indent + '  ';
+      
+      // Debug logging
+      if (process.env.NODE_ENV !== 'production' && key.includes('Trait')) {
+        console.log(`      Processing include for key "${key}" from ${includePath.trim()}`);
+        console.log(`        Base indent: "${indent}" (${indent.length} spaces)`);
+        console.log(`        Additional indent: "${additionalIndent}" (${additionalIndent.length} spaces)`);
+        console.log(`        Base indent of included file: ${baseIndentOfIncludedFile}`);
+        console.log(`        First 5 lines of included content:`);
+        contentLines.slice(0, 5).forEach((line, idx) => {
+          console.log(`          ${idx + 1}: [${line.search(/\S/)}] "${line}"`);
+        });
+      }
       for (const contentLine of contentLines) {
         if (contentLine.trim()) {
           // Remove the base indentation from the included file and add our indentation
