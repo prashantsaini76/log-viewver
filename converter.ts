@@ -446,16 +446,48 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
               console.error('YAML Parse Error:', e.message);
               console.error('Error name:', e.name);
               
+              // Parse the error message to find line number
+              const lineMatch = e.message.match(/\((\d+):(\d+)\)/);
+              const errorLineNum = lineMatch ? parseInt(lineMatch[1]) - 1 : -1;
+              
               // Show a snippet of the library content that failed to parse
               const lines = libContent.split('\n');
-              console.error(`\nLibrary content (first 20 lines):`);
-              lines.slice(0, 20).forEach((line, idx) => {
-                console.error(`  ${idx + 1}: ${line}`);
-              });
+              
+              if (errorLineNum >= 0) {
+                // Show context around the error line
+                const start = Math.max(0, errorLineNum - 10);
+                const end = Math.min(lines.length, errorLineNum + 5);
+                
+                console.error(`\nLibrary content around error (lines ${start + 1}-${end + 1}):`);
+                lines.slice(start, end).forEach((line, idx) => {
+                  const lineNum = start + idx + 1;
+                  const isErrorLine = (start + idx === errorLineNum);
+                  const marker = isErrorLine ? ' <-- ERROR' : '';
+                  const spaces = line.search(/\S/) === -1 ? 0 : line.search(/\S/);
+                  console.error(`  ${lineNum.toString().padStart(3)} [${spaces.toString().padStart(2)}sp] | ${line}${marker}`);
+                });
+              } else {
+                console.error(`\nLibrary content (first 20 lines):`);
+                lines.slice(0, 20).forEach((line, idx) => {
+                  const spaces = line.search(/\S/) === -1 ? 0 : line.search(/\S/);
+                  console.error(`  ${(idx + 1).toString().padStart(3)} [${spaces.toString().padStart(2)}sp] | ${line}`);
+                });
+              }
               
               if (lines.length > 20) {
                 console.error(`  ... and ${lines.length - 20} more lines`);
               }
+              
+              // Show FULL content with indentation markers
+              console.error(`\n\n=== FULL LIBRARY CONTENT (${lines.length} lines) ===`);
+              lines.forEach((line, idx) => {
+                const lineNum = idx + 1;
+                const isErrorLine = (idx === errorLineNum);
+                const marker = isErrorLine ? ' <-- ERROR' : '';
+                const spaces = line.search(/\S/) === -1 ? 0 : line.search(/\S/);
+                console.error(`${lineNum.toString().padStart(3)} [${spaces.toString().padStart(2)}sp] | ${line}${marker}`);
+              });
+              console.error('=== END FULL LIBRARY CONTENT ===\n');
               
               if (e.message.includes('unknown tag')) {
                 console.error('\n💡 Tip: This library may contain unresolved !include directives or RAML-specific syntax.');
