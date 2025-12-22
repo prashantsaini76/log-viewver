@@ -756,6 +756,17 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
       const additionalIndent = indent + '  ';
       
       // Debug logging
+      logToFile(`\n>>> Processing Pattern 1: key: !include`);
+      logToFile(`    Key: "${key}"`);
+      logToFile(`    Include path: ${includePath.trim()}`);
+      logToFile(`    Base indent: "${indent}" (${indent.length} chars)`);
+      logToFile(`    Additional indent: "${additionalIndent}" (${additionalIndent.length} chars)`);
+      logToFile(`    Base indent of included file: ${baseIndentOfIncludedFile}`);
+      logToFile(`    First 3 lines of included file:`);
+      contentLines.slice(0, 3).forEach((line, idx) => {
+        logToFile(`      ${idx + 1}: [${line.search(/\S/)}sp] "${line}"`);
+      });
+      
       if (process.env.NODE_ENV !== 'production' && key.includes('Trait')) {
         console.log(`      Processing include for key "${key}" from ${includePath.trim()}`);
         console.log(`        Base indent: "${indent}" (${indent.length} spaces)`);
