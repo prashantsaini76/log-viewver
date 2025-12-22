@@ -224,7 +224,7 @@ Full error: ${errorMsg}
  * Resolve local type references within a library's types collection
  * E.g., if UserLogDetlPostReq references another type in the same library
  */
-function resolveLocalTypeReferences(types: any, maxDepth = 5): any {
+function resolveLocalTypeReferences(types: any, maxDepth = 10): any {
   if (!types || maxDepth <= 0) return types;
   
   const resolved: any = {};
@@ -266,7 +266,16 @@ function resolveTypeInObject(obj: any, types: any, depth: number): any {
     // Keep other properties from the original object
     for (const key in obj) {
       if (key !== 'type') {
-        result[key] = obj[key];
+        if (key === 'properties' && result.properties) {
+          // Merge properties objects and recursively resolve them
+          const mergedProps = { ...result.properties, ...obj[key] };
+          result[key] = {};
+          for (const propName in mergedProps) {
+            result[key][propName] = resolveTypeInObject(mergedProps[propName], types, depth - 1);
+          }
+        } else {
+          result[key] = obj[key];
+        }
       }
     }
     
@@ -277,19 +286,38 @@ function resolveTypeInObject(obj: any, types: any, depth: number): any {
   const result: any = Array.isArray(obj) ? [] : {};
   
   for (const key in obj) {
-    if (key === 'properties' && typeof obj[key] === 'object') {
+    const value = obj[key];
+    
+    if (key === 'properties' && typeof value === 'object') {
       // Recursively resolve types in properties
       result[key] = {};
-      for (const propName in obj[key]) {
-        result[key][propName] = resolveTypeInObject(obj[key][propName], types, depth - 1);
+      for (const propName in value) {
+        result[key][propName] = resolveTypeInObject(value[propName], types, depth - 1);
       }
-    } else if (key === 'items' && typeof obj[key] === 'object') {
-      // Recursively resolve types in array items
-      result[key] = resolveTypeInObject(obj[key], types, depth - 1);
-    } else if (typeof obj[key] === 'object') {
-      result[key] = resolveTypeInObject(obj[key], types, depth - 1);
+    } else if (key === 'items') {
+      // Handle array items - can be a string reference or an object
+      if (typeof value === 'string' && types[value]) {
+        // items is a type reference string like "customerGetResponse"
+        result[key] = resolveTypeInObject(types[value], types, depth - 1);
+      } else if (typeof value === 'object') {
+        // items is an object definition
+        result[key] = resolveTypeInObject(value, types, depth - 1);
+      } else if (typeof value === 'string') {
+        // items is a string but not a type reference (e.g., "string", "number")
+        result[key] = value;
+      } else {
+        result[key] = value;
+      }
+    } else if (key === 'type' && typeof value === 'string' && types[value]) {
+      // Already handled above at line 259-272, but keep the property
+      result[key] = value;
+    } else if (typeof value === 'object') {
+      result[key] = resolveTypeInObject(value, types, depth - 1);
+    } else if (typeof value === 'string' && types[value]) {
+      // Any other property that's a string and matches a type name
+      result[key] = resolveTypeInObject(types[value], types, depth - 1);
     } else {
-      result[key] = obj[key];
+      result[key] = value;
     }
   }
   
@@ -1079,20 +1107,55 @@ function convertMethod(methodData: any, methodName?: string, traits?: any, pathP
  */
 function convertDataType(typeData: any): any {
   if (typeof typeData === 'string') {
+    // Check if it's a union type (e.g., "object | object[]")
+    if (typeData.includes('|')) {
+      const types = typeData.split('|').map(t => t.trim());
+      return {
+        oneOf: types.map(t => {
+          // Handle array types like "object[]"
+          if (t.endsWith('[]')) {
+            const itemType = t.slice(0, -2).trim();
+            return {
+              type: 'array',
+              items: { type: mapRamlTypeToOasType(itemType) }
+            };
+          }
+          return { type: mapRamlTypeToOasType(t) };
+        })
+      };
+    }
     return { type: mapRamlTypeToOasType(typeData) };
   }
 
   const schema: any = {};
 
   if (typeData.type) {
-    const baseType = Array.isArray(typeData.type) ? typeData.type[0] : typeData.type;
-    
-    // If baseType is an object (expanded library type), convert it recursively
-    if (typeof baseType === 'object') {
-      return convertDataType(baseType);
+    // Check if type is a union type string
+    if (typeof typeData.type === 'string' && typeData.type.includes('|')) {
+      const types = typeData.type.split('|').map((t: string) => t.trim());
+      schema.oneOf = types.map((t: string) => {
+        // Handle array types like "object[]"
+        if (t.endsWith('[]')) {
+          const itemType = t.slice(0, -2).trim();
+          return {
+            type: 'array',
+            items: { type: mapRamlTypeToOasType(itemType) }
+          };
+        }
+        return { type: mapRamlTypeToOasType(t) };
+      });
+      
+      // Don't set schema.type when using oneOf
+    } else {
+      const baseType = Array.isArray(typeData.type) ? typeData.type[0] : typeData.type;
+      
+      // If baseType is an object (expanded library type), convert it recursively
+      if (typeof baseType === 'object') {
+        return convertDataType(baseType);
+      }
+      
+      schema.type = mapRamlTypeToOasType(baseType);
     }
-    
-    schema.type = mapRamlTypeToOasType(baseType);
   } else {
     schema.type = 'object';
   }
@@ -1199,9 +1262,12 @@ function convertBodySchema(body: any): any {
       return convertDataType(body);
     }
     
-    // If type is already an object (expanded library type), return the whole body as schema
+    // If type is already an object (expanded library type from resolveLibraries)
+    // The structure after expansion is: { type: { type: 'object', properties: {...} } }
+    // We need to return the inner type object directly
     if (typeof body.type === 'object') {
-      return convertDataType(body);
+      // The body.type is already the schema we want (from library type expansion)
+      return convertDataType(body.type);
     }
   }
 
