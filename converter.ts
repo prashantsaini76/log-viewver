@@ -549,6 +549,25 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
               if (libContent.includes('uses:')) {
                 console.error('\n💡 Tip: This library has a "uses:" block - it may be importing other libraries that need to be resolved first.');
               }
+              
+              // Save the problematic library content to a file for manual inspection/fixing
+              try {
+                const logsDir = path.join(process.cwd(), 'logs');
+                if (!fs.existsSync(logsDir)) {
+                  fs.mkdirSync(logsDir, { recursive: true });
+                }
+                
+                // Extract just the filename from the library path
+                const fileName = libPath.split('/').pop() || `${libName}.raml`;
+                const outputPath = path.join(logsDir, fileName);
+                
+                fs.writeFileSync(outputPath, libContent, 'utf-8');
+                console.error(`\n📝 Saved problematic library content to: logs/${fileName}`);
+                console.error(`   You can manually fix the indentation in this file.`);
+                logToFile(`\n📝 Saved problematic library content to: logs/${fileName}`);
+              } catch (saveError) {
+                console.error('Failed to save library content to file:', saveError);
+              }
             }
             
             // Create a more informative error message that includes the context
