@@ -1,0 +1,1045 @@
+import * as yaml from 'js-yaml';
+
+interface FileMap {
+  [path: string]: string;
+}
+
+export interface ConversionResult {
+  oas: any;
+  yaml: string;
+}
+
+/**
+ * Convert RAML to OpenAPI Specification (OAS)
+ * Supports multi-file RAML projects with includes and references
+ */
+export async function convertRamlToOas(
+  files: FileMap,
+  mainRamlFile: string
+): Promise<ConversionResult> {
+  try {
+    // Get the main RAML content
+    const mainRamlContent = files[mainRamlFile];
+    if (!mainRamlContent) {
+      throw new Error(`Main RAML file not found: ${mainRamlFile}`);
+    }
+
+    // First, resolve all !include directives (keep resolving until no more includes)
+    let resolvedContent = mainRamlContent;
+    let maxIterations = 10; // Prevent infinite loops
+    let iteration = 0;
+    
+    while (resolvedContent.includes('!include') && iteration < maxIterations) {
+      resolvedContent = resolveIncludes(resolvedContent, files, mainRamlFile);
+      iteration++;
+    }
+    
+    if (resolvedContent.includes('!include')) {
+      console.warn('Warning: Some !include directives may not have been resolved after 10 iterations');
+    }
+
+    // Then, resolve libraries referenced with 'uses:' (AFTER includes are resolved)
+    const libraryResolvedContent = resolveLibraries(resolvedContent, files, mainRamlFile);
+
+    // Parse the resolved RAML as YAML
+    let ramlData;
+    try {
+      ramlData = yaml.load(libraryResolvedContent) as any;
+    } catch (yamlError) {
+      // If YAML parsing fails, check if there are any unresolved !include directives
+      const unresolvedIncludes = libraryResolvedContent.match(/!include\s+[^\n]+/g);
+      if (unresolvedIncludes) {
+        throw new Error(
+          `YAML parsing failed. Found unresolved !include directives:\n${unresolvedIncludes.join('\n')}\n\nOriginal error: ${yamlError instanceof Error ? yamlError.message : 'Unknown error'}`
+        );
+      }
+      throw yamlError;
+    }
+
+    if (!ramlData || typeof ramlData !== 'object') {
+      throw new Error('Invalid RAML format');
+    }
+
+    // Resolve traits and apply them to methods
+    ramlData = resolveTraits(ramlData);
+
+    // Convert RAML to OpenAPI
+    const oasSpec = convertRamlToOasSpec(ramlData);
+
+    // Convert to YAML
+    const yamlOutput = yaml.dump(oasSpec, { indent: 2, lineWidth: -1 });
+
+    return {
+      oas: oasSpec,
+      yaml: yamlOutput,
+    };
+  } catch (error) {
+    console.error('RAML to OAS conversion error:', error);
+    
+    // Create detailed error message with context
+    let errorMessage = 'Failed to convert RAML to OAS';
+    
+    if (error instanceof Error) {
+      errorMessage += `: ${error.message}`;
+      
+      // Add file context if available in stack trace
+      if (error.stack) {
+        const fileMatch = error.stack.match(/at\s+.*?\((.+?):\d+:\d+\)/);
+        if (fileMatch) {
+          errorMessage += `\n\nError occurred in: ${fileMatch[1]}`;
+        }
+      }
+    }
+    
+    // Add the main RAML file being processed
+    errorMessage += `\n\nProcessing file: ${mainRamlFile}`;
+    
+    throw new Error(errorMessage);
+  }
+}
+
+/**
+ * Resolve library imports (uses: keyword)
+ */
+function resolveLibraries(content: string, files: FileMap, currentFile: string): string {
+  const lines = content.split('\n');
+  let inUsesBlock = false;
+  let usesIndent = 0;
+  const libraries: { [key: string]: any } = {};
+  
+  // Debug
+  let usesFound = false;
+  
+  // First pass: extract libraries
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    
+    if (trimmed === 'uses:') {
+      inUsesBlock = true;
+      usesFound = true;
+      usesIndent = line.search(/\S/);
+      if (process.env.NODE_ENV !== 'production') {
+        console.log('Found uses: block at line', i);
+      }
+      continue;
+    }
+    
+    if (inUsesBlock) {
+      const lineIndent = line.search(/\S/);
+      
+      // Check if we're still in the uses block
+      if (lineIndent <= usesIndent && trimmed !== '') {
+        inUsesBlock = false;
+        continue;
+      }
+      
+      if (trimmed && trimmed.includes(':')) {
+        const [libName, libPath] = trimmed.split(':').map(s => s.trim());
+        
+        if (process.env.NODE_ENV !== 'production') {
+          console.log(`  Library found: ${libName} -> ${libPath}`);
+        }
+        
+        // Resolve library file path
+        const currentDir = currentFile.split('/').slice(0, -1).join('/');
+        let resolvedPath = currentDir ? `${currentDir}/${libPath}` : libPath;
+        resolvedPath = resolvedPath.replace(/\/\.\//g, '/');
+        
+        let libContent = files[resolvedPath] || files[libPath];
+        
+        if (!libContent) {
+          for (const filePath in files) {
+            if (filePath.endsWith(libPath) || filePath === resolvedPath) {
+              libContent = files[filePath];
+              resolvedPath = filePath;
+              break;
+            }
+          }
+        }
+        
+        if (libContent) {
+          // Resolve includes in library
+          if (libContent.includes('!include')) {
+            libContent = resolveIncludes(libContent, files, resolvedPath);
+          }
+          
+          // Parse library content
+          try {
+            const libData = yaml.load(libContent) as any;
+            libraries[libName] = libData;
+            
+            if (process.env.NODE_ENV !== 'production') {
+              console.log(`    Loaded library ${libName} with types:`, libData.types ? Object.keys(libData.types) : 'none');
+            }
+          } catch (e) {
+            const errorMsg = `Failed to parse library ${libName} from ${libPath} in file: ${currentFile}`;
+            console.error(errorMsg, e);
+            throw new Error(errorMsg);
+          }
+        } else {
+          const errorMsg = `Library file not found: ${libName} at path ${libPath} (referenced in file: ${currentFile})`;
+          console.error(errorMsg);
+          throw new Error(errorMsg);
+        }
+      }
+    }
+  }
+  
+  if (!usesFound && process.env.NODE_ENV !== 'production') {
+    console.log('No uses: block found in content');
+  }
+  
+  // Second pass: replace library type references with actual type definitions
+  let result = content;
+  
+  for (const libName in libraries) {
+    const lib = libraries[libName];
+    
+    // Replace type references like CommonTypes.User[] or ErrorTypes.ErrorResponse
+    if (lib.types) {
+      for (const typeName in lib.types) {
+        const fullTypeName = `${libName}.${typeName}`;
+        const typeData = lib.types[typeName];
+        
+        if (process.env.NODE_ENV !== 'production') {
+          console.log(`  Replacing ${fullTypeName}...`);
+        }
+        
+        // Handle array types like CommonTypes.User[]
+        const arrayRegex = new RegExp(`([ \\t]*)(type):\\s*${fullTypeName.replace('.', '\\.')}\\[\\]`, 'g');
+        result = result.replace(arrayRegex, (match, leadingSpaces, typeKeyword) => {
+          const baseIndent = leadingSpaces.length;
+          const sameIndent = ' '.repeat(baseIndent);
+          const propsIndent = ' '.repeat(baseIndent + 2);
+          
+          if (process.env.NODE_ENV !== 'production') {
+            console.log(`    Match: "${match}", leadingSpaces.length=${leadingSpaces.length}, baseIndent=${baseIndent}`);
+          }
+          
+          // Dump the type data and indent it properly
+          const yamlStr = yaml.dump(typeData, { indent: 2, lineWidth: -1 });
+          const lines = yamlStr.trim().split('\n');
+          const indentedProps = lines.map(line => propsIndent + line).join('\n');
+          
+          const replacement = `${leadingSpaces}${typeKeyword}: array\n${sameIndent}items:\n${indentedProps}`;
+          
+          if (process.env.NODE_ENV !== 'production') {
+            console.log(`    Array replacement:\n"${replacement.substring(0, 100)}"`);
+          }
+          return replacement;
+        });
+        
+        // Handle single type references like CommonTypes.User
+        const singleRegex = new RegExp(`([ \\t]*)(type):\\s*${fullTypeName.replace('.', '\\.')}(?!\\[)`, 'g');
+        result = result.replace(singleRegex, (match, leadingSpaces, typeKeyword) => {
+          const baseIndent = leadingSpaces.length;
+          const propsIndent = ' '.repeat(baseIndent + 2);
+          
+          // Dump the type data and indent it properly
+          const yamlStr = yaml.dump(typeData, { indent: 2, lineWidth: -1 });
+          const lines = yamlStr.trim().split('\n');
+          const indentedProps = lines.map(line => propsIndent + line).join('\n');
+          
+          const replacement = `${leadingSpaces}${typeKeyword}:\n${indentedProps}`;
+          
+          if (process.env.NODE_ENV !== 'production') {
+            console.log(`    Single replacement (indent=${baseIndent}):\n${replacement.substring(0, 200)}`);
+          }
+          return replacement;
+        });
+      }
+    }
+  }
+  
+  // Debug: Log result after all replacements
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('=== After all library type replacements ===');
+    console.log(result.substring(result.indexOf('/users'), result.indexOf('/users') + 500));
+    console.log('...\n');
+  }
+  
+  // Remove the uses: block from content
+  const resultLines = result.split('\n'); // Use result, not lines!
+  const cleanedLines: string[] = [];
+  inUsesBlock = false;
+  
+  for (let i = 0; i < resultLines.length; i++) {
+    const line = resultLines[i];
+    const trimmed = line.trim();
+    
+    if (trimmed === 'uses:') {
+      inUsesBlock = true;
+      usesIndent = line.search(/\S/);
+      continue;
+    }
+    
+    if (inUsesBlock) {
+      const lineIndent = line.search(/\S/);
+      if (lineIndent <= usesIndent && trimmed !== '') {
+        inUsesBlock = false;
+        cleanedLines.push(line);
+      }
+    } else {
+      cleanedLines.push(line);
+    }
+  }
+  
+  return cleanedLines.join('\n');
+}
+
+/**
+ * Helper function to indent YAML content
+ */
+function indentYaml(obj: any, spaces: number, includeTypePrefix = false): string {
+  const yamlStr = yaml.dump(obj, { indent: 2, lineWidth: -1 });
+  const lines = yamlStr.trim().split('\n');
+  const indent = ' '.repeat(spaces);
+  
+  if (includeTypePrefix && lines.length > 0) {
+    // For inline type replacement, first line should be "type: " + first property
+    const firstLine = lines[0];
+    const restLines = lines.slice(1).map(line => indent + line).join('\n');
+    return `type:\n${indent}${firstLine}\n${restLines}`;
+  }
+  
+  return lines.map(line => indent + line).join('\n');
+}
+
+/**
+ * Resolve all !include directives in RAML content
+ */
+function resolveIncludes(content: string, files: FileMap, currentFile: string): string {
+  const lines = content.split('\n');
+  const result: string[] = [];
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    
+    // Pattern 1: "key: !include file.raml"
+    const includeAfterColon = line.match(/^(\s*)(.+?):\s*!include\s+(.+)$/);
+    
+    // Pattern 2: "  !include file.raml" (entire value is include)
+    const includeAsValue = line.match(/^(\s*)!include\s+(.+)$/);
+    
+    if (includeAfterColon) {
+      const [, indent, key, includePath] = includeAfterColon;
+      const fileContent = getIncludedContent(includePath.trim(), files, currentFile);
+      
+      if (!fileContent) {
+        const errorMsg = `Failed to resolve !include at line ${i + 1} in file: ${currentFile}\n  Include path: ${includePath.trim()}`;
+        console.error(errorMsg);
+        throw new Error(errorMsg);
+      }
+      
+      // Add the key with proper indentation
+      result.push(`${indent}${key}:`);
+      
+      // Add included content with additional indentation
+      const additionalIndent = indent + '  ';
+      for (const contentLine of fileContent.split('\n')) {
+        if (contentLine.trim()) {
+          result.push(additionalIndent + contentLine);
+        } else {
+          result.push(contentLine);
+        }
+      }
+    } else if (includeAsValue) {
+      const [, indent, includePath] = includeAsValue;
+      const fileContent = getIncludedContent(includePath.trim(), files, currentFile);
+      
+      if (!fileContent) {
+        const errorMsg = `Failed to resolve !include at line ${i + 1} in file: ${currentFile}\n  Include path: ${includePath.trim()}`;
+        console.error(errorMsg);
+        throw new Error(errorMsg);
+      }
+      
+      // Replace the !include line with the content (maintaining indentation)
+      for (const contentLine of fileContent.split('\n')) {
+        if (contentLine.trim()) {
+          result.push(indent + contentLine);
+        } else {
+          result.push(contentLine);
+        }
+      }
+    } else {
+      // No include in this line, keep it as is
+      result.push(line);
+    }
+  }
+  
+  return result.join('\n');
+}
+
+/**
+ * Get included file content and resolve nested includes
+ */
+function getIncludedContent(includePath: string, files: FileMap, currentFile: string): string | null {
+  // Get the directory of the current file
+  const currentDir = currentFile.split('/').slice(0, -1).join('/');
+  
+  // Resolve the include path relative to current file
+  let resolvedPath = currentDir ? `${currentDir}/${includePath}` : includePath;
+  
+  // Normalize path - handle ./ and ../
+  resolvedPath = resolvedPath.replace(/\/\.\//g, '/'); // Remove ./
+  
+  // Handle ../ (parent directory)
+  while (resolvedPath.includes('../')) {
+    resolvedPath = resolvedPath.replace(/[^\/]+\/\.\.\//g, '');
+  }
+  
+  // Remove leading slash if present
+  resolvedPath = resolvedPath.replace(/^\/+/, '');
+  
+  // Try to find the file
+  let fileContent = files[resolvedPath] || files[includePath];
+  
+  // Try without leading slash
+  if (!fileContent && resolvedPath.startsWith('/')) {
+    fileContent = files[resolvedPath.substring(1)];
+  }
+  
+  // Try normalized paths
+  if (!fileContent) {
+    const normalizedPath = includePath.replace(/^\.\//, '');
+    fileContent = files[normalizedPath];
+    
+    // Search through all files for a match
+    for (const filePath in files) {
+      // Normalize file paths for comparison
+      const normalizedFilePath = filePath.replace(/^\/+/, '');
+      const normalizedResolvedPath = resolvedPath.replace(/^\/+/, '');
+      
+      if (normalizedFilePath === normalizedResolvedPath) {
+        fileContent = files[filePath];
+        resolvedPath = filePath;
+        break;
+      }
+      
+      if (filePath.endsWith(includePath) || filePath.endsWith(normalizedPath)) {
+        fileContent = files[filePath];
+        resolvedPath = filePath;
+        break;
+      }
+      
+      // Try matching the full resolved path
+      if (filePath === resolvedPath || filePath.endsWith(resolvedPath)) {
+        fileContent = files[filePath];
+        resolvedPath = filePath;
+        break;
+      }
+    }
+  }
+  
+  if (!fileContent) {
+    console.warn(`Include file not found: ${includePath} (tried: ${resolvedPath})`);
+    console.warn(`Current file: ${currentFile}`);
+    console.warn(`Available files: ${Object.keys(files).join(', ')}`);
+    return null;
+  }
+  
+  // If the included file also has includes, resolve them recursively
+  if (fileContent.includes('!include')) {
+    fileContent = resolveIncludes(fileContent, files, resolvedPath);
+  }
+  
+  // Remove RAML header from included content
+  const contentLines = fileContent.split('\n');
+  let startIndex = 0;
+  
+  // Skip RAML version header and declarations
+  for (let j = 0; j < contentLines.length; j++) {
+    const contentLine = contentLines[j].trim();
+    if (contentLine.startsWith('#%RAML')) {
+      startIndex = j + 1;
+      continue;
+    }
+    if (contentLine && !contentLine.startsWith('#')) {
+      break;
+    }
+  }
+  
+  return contentLines.slice(startIndex).join('\n');
+}
+
+/**
+ * Resolve traits (is: keyword) and merge into methods
+ */
+function resolveTraits(ramlData: any): any {
+  const traits: { [key: string]: any } = {};
+  
+  if (process.env.NODE_ENV !== 'production') {
+    console.log('=== resolveTraits called ===');
+  }
+  
+  // Extract traits from RAML data
+  if (ramlData.traits) {
+    if (Array.isArray(ramlData.traits)) {
+      // traits: [ { traitName: {...} }, ... ]
+      ramlData.traits.forEach((traitObj: any) => {
+        const traitName = Object.keys(traitObj)[0];
+        traits[traitName] = traitObj[traitName];
+      });
+    } else {
+      // traits: { traitName: {...}, ... }
+      Object.assign(traits, ramlData.traits);
+    }
+    
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('  Found traits:', Object.keys(traits));
+    }
+  }
+  
+  // Apply traits to all methods that have "is:"
+  function applyTraitsToResource(resource: any, inheritedTraits: string[] = []) {
+    if (!resource) return;
+    
+    // Check for resource-level "is:" (traits applied to all methods in this resource)
+    let resourceTraits: string[] = [...inheritedTraits];
+    if (resource.is) {
+      const localTraits = Array.isArray(resource.is) ? resource.is : [resource.is];
+      resourceTraits = [...resourceTraits, ...localTraits];
+      
+      if (process.env.NODE_ENV !== 'production') {
+        console.log(`  Resource-level traits found:`, localTraits);
+      }
+    }
+    
+    // Process each HTTP method
+    const httpMethods = ['get', 'post', 'put', 'patch', 'delete', 'options', 'head'];
+    for (const method of httpMethods) {
+      if (resource[method]) {
+        const methodData = resource[method];
+        
+        // Combine inherited traits with method-level traits
+        let traitNames = [...resourceTraits];
+        if (methodData.is) {
+          const methodTraits = Array.isArray(methodData.is) ? methodData.is : [methodData.is];
+          traitNames = [...traitNames, ...methodTraits];
+          delete methodData.is;
+        }
+        
+        if (traitNames.length > 0) {
+          if (process.env.NODE_ENV !== 'production') {
+            console.log(`  Applying traits to ${method}:`, traitNames);
+          }
+          
+          // Apply each trait in order
+          for (const traitName of traitNames) {
+            if (traits[traitName]) {
+              const trait = traits[traitName];
+              
+              if (process.env.NODE_ENV !== 'production') {
+                console.log(`    Merging trait ${traitName}:`, {
+                  headers: trait.headers ? Object.keys(trait.headers) : 'none',
+                  queryParameters: trait.queryParameters ? Object.keys(trait.queryParameters) : 'none'
+                });
+              }
+              
+              // Merge headers
+              if (trait.headers) {
+                methodData.headers = { ...trait.headers, ...(methodData.headers || {}) };
+              }
+              
+              // Merge query parameters
+              if (trait.queryParameters) {
+                methodData.queryParameters = { ...trait.queryParameters, ...(methodData.queryParameters || {}) };
+              }
+              
+              // Merge responses
+              if (trait.responses) {
+                methodData.responses = { ...trait.responses, ...(methodData.responses || {}) };
+              }
+              
+              // Merge description
+              if (trait.description && !methodData.description) {
+                methodData.description = trait.description;
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    // Remove resource-level "is:" after applying
+    if (resource.is) {
+      delete resource.is;
+    }
+    
+    // Recursively process nested resources, passing down the traits
+    for (const key in resource) {
+      if (key.startsWith('/')) {
+        applyTraitsToResource(resource[key], resourceTraits);
+      }
+    }
+  }
+  
+  // Apply traits to all resources
+  for (const key in ramlData) {
+    if (key.startsWith('/')) {
+      applyTraitsToResource(ramlData[key]);
+    }
+  }
+  
+  return ramlData;
+}
+
+/**
+ * Convert resolved RAML data to OpenAPI 3.0 specification
+ */
+function convertRamlToOasSpec(ramlData: any): any {
+  // Basic OAS 3.0 structure
+  const oas: any = {
+    openapi: '3.0.0',
+    info: {
+      title: ramlData.title || 'API',
+      version: ramlData.version || '1.0.0',
+      description: ramlData.description || '',
+    },
+    servers: [],
+    paths: {},
+    components: {
+      schemas: {},
+      securitySchemes: {},
+    },
+  };
+
+  // Convert base URI to servers
+  if (ramlData.baseUri) {
+    oas.servers.push({
+      url: ramlData.baseUri.replace(/{version}/g, ramlData.version || '1.0.0'),
+    });
+  }
+
+  // Convert protocols
+  if (ramlData.protocols && ramlData.protocols.length > 0) {
+    const protocol = ramlData.protocols[0].toLowerCase();
+    if (!ramlData.baseUri) {
+      oas.servers.push({ url: `${protocol}://example.com` });
+    }
+  }
+
+  // Convert security schemes
+  if (ramlData.securitySchemes) {
+    for (const schemeName in ramlData.securitySchemes) {
+      const scheme = ramlData.securitySchemes[schemeName];
+      oas.components.securitySchemes[schemeName] = convertSecurityScheme(scheme);
+    }
+  }
+
+  // Convert data types/schemas
+  if (ramlData.types) {
+    for (const typeName in ramlData.types) {
+      const type = ramlData.types[typeName];
+      oas.components.schemas[typeName] = convertDataType(type);
+    }
+  }
+
+  // Extract traits for use in resources
+  const traits = ramlData.traits || {};
+
+  // Convert resources (endpoints) - iterate over keys starting with '/'
+  for (const key in ramlData) {
+    if (key.startsWith('/')) {
+      convertResource(key, ramlData[key], oas.paths, '', traits);
+    }
+  }
+
+  return oas;
+}
+
+/**
+ * Convert a single RAML resource to OAS path
+ */
+function convertResource(path: string, resource: any, paths: any, parentPath: string, traits?: any) {
+  const fullPath = parentPath + path;
+  
+  if (!paths[fullPath]) {
+    paths[fullPath] = {};
+  }
+  
+  // Extract URI parameters from path (like /{id} or /{userId})
+  const pathParams: any = {};
+  const pathParamMatches = fullPath.matchAll(/\{([^}]+)\}/g);
+  for (const match of pathParamMatches) {
+    const paramName = match[1];
+    pathParams[paramName] = {
+      type: 'string',
+      required: true,
+    };
+  }
+  
+  // Merge resource-level uriParameters with extracted path params
+  if (resource.uriParameters) {
+    Object.assign(pathParams, resource.uriParameters);
+  }
+
+  // Convert HTTP methods (get, post, put, delete, etc.)
+  const httpMethods = ['get', 'post', 'put', 'delete', 'patch', 'options', 'head'];
+  
+  for (const method of httpMethods) {
+    if (resource[method]) {
+      paths[fullPath][method] = convertMethod(resource[method], method, traits, pathParams);
+    }
+  }
+
+  // Recursively process nested resources
+  for (const key in resource) {
+    if (key.startsWith('/')) {
+      convertResource(key, resource[key], paths, fullPath, traits);
+    }
+  }
+}
+
+/**
+ * Convert RAML method to OAS operation
+ */
+function convertMethod(methodData: any, methodName?: string, traits?: any, pathParams?: any): any {
+  // Apply traits if the method uses them (is: [trait1, trait2])
+  if (methodData.is && Array.isArray(methodData.is) && traits) {
+    for (const traitName of methodData.is) {
+      if (traits[traitName]) {
+        // Merge trait properties into method
+        methodData = { ...traits[traitName], ...methodData };
+      }
+    }
+  }
+
+  const operation: any = {
+    summary: methodData.displayName || methodData.description || (methodName ? methodName.toUpperCase() : 'Operation'),
+    description: methodData.description || '',
+    responses: {},
+  };
+
+  // Add path parameters first
+  if (pathParams && Object.keys(pathParams).length > 0) {
+    operation.parameters = [];
+    for (const paramName in pathParams) {
+      const param = pathParams[paramName];
+      operation.parameters.push({
+        name: paramName,
+        in: 'path',
+        required: true,
+        description: param.description || '',
+        schema: convertParamType(param),
+      });
+    }
+  }
+
+  // Convert query parameters
+  if (methodData.queryParameters) {
+    if (!operation.parameters) operation.parameters = [];
+    for (const paramName in methodData.queryParameters) {
+      const param = methodData.queryParameters[paramName];
+      operation.parameters.push({
+        name: paramName,
+        in: 'query',
+        required: param.required || false,
+        description: param.description || '',
+        schema: convertParamType(param),
+      });
+    }
+  }
+
+  // Convert URI parameters from method (in addition to path params)
+  if (methodData.uriParameters) {
+    if (!operation.parameters) operation.parameters = [];
+    for (const paramName in methodData.uriParameters) {
+      // Skip if already added as path parameter
+      const alreadyAdded = operation.parameters.some((p: any) => p.name === paramName && p.in === 'path');
+      if (!alreadyAdded) {
+        const param = methodData.uriParameters[paramName];
+        operation.parameters.push({
+          name: paramName,
+          in: 'path',
+          required: true,
+          description: param.description || '',
+          schema: convertParamType(param),
+        });
+      }
+    }
+  }
+
+  // Convert headers
+  if (methodData.headers) {
+    if (!operation.parameters) operation.parameters = [];
+    for (const headerName in methodData.headers) {
+      const header = methodData.headers[headerName];
+      operation.parameters.push({
+        name: headerName,
+        in: 'header',
+        required: header.required || false,
+        description: header.description || '',
+        schema: convertParamType(header),
+      });
+    }
+  }
+
+  // Convert request body
+  if (methodData.body) {
+    operation.requestBody = {
+      content: {},
+    };
+
+    for (const contentType in methodData.body) {
+      const bodyData = methodData.body[contentType];
+      operation.requestBody.content[contentType] = {
+        schema: convertBodySchema(bodyData),
+      };
+    }
+  }
+
+  // Convert responses
+  if (methodData.responses) {
+    for (const statusCode in methodData.responses) {
+      const responseData = methodData.responses[statusCode];
+      operation.responses[statusCode] = {
+        description: responseData.description || `Response ${statusCode}`,
+      };
+
+      if (responseData.body) {
+        operation.responses[statusCode].content = {};
+        for (const contentType in responseData.body) {
+          const bodyData = responseData.body[contentType];
+          operation.responses[statusCode].content[contentType] = {
+            schema: convertBodySchema(bodyData),
+          };
+        }
+      }
+    }
+  }
+
+  // Default response if none specified
+  if (Object.keys(operation.responses).length === 0) {
+    operation.responses['200'] = {
+      description: 'Success',
+    };
+  }
+
+  return operation;
+}
+
+/**
+ * Convert RAML data type to OAS schema
+ */
+function convertDataType(typeData: any): any {
+  if (typeof typeData === 'string') {
+    return { type: mapRamlTypeToOasType(typeData) };
+  }
+
+  const schema: any = {};
+
+  if (typeData.type) {
+    const baseType = Array.isArray(typeData.type) ? typeData.type[0] : typeData.type;
+    
+    // If baseType is an object (expanded library type), convert it recursively
+    if (typeof baseType === 'object') {
+      return convertDataType(baseType);
+    }
+    
+    schema.type = mapRamlTypeToOasType(baseType);
+  } else {
+    schema.type = 'object';
+  }
+
+  if (typeData.description) schema.description = typeData.description;
+  
+  if (typeData.properties) {
+    schema.properties = {};
+    const required: string[] = [];
+    
+    for (const propName in typeData.properties) {
+      const prop = typeData.properties[propName];
+      schema.properties[propName] = convertDataType(prop);
+      
+      if (prop.required) {
+        required.push(propName);
+      }
+    }
+    
+    if (required.length > 0) {
+      schema.required = required;
+    }
+  }
+
+  if (typeData.items) {
+    schema.items = convertDataType(typeData.items);
+  }
+
+  if (typeData.enum) schema.enum = typeData.enum;
+  if (typeData.pattern) schema.pattern = typeData.pattern;
+  if (typeData.minLength !== undefined) schema.minLength = typeData.minLength;
+  if (typeData.maxLength !== undefined) schema.maxLength = typeData.maxLength;
+  if (typeData.minimum !== undefined) schema.minimum = typeData.minimum;
+  if (typeData.maximum !== undefined) schema.maximum = typeData.maximum;
+  if (typeData.default !== undefined) schema.default = typeData.default;
+  if (typeData.example !== undefined) schema.example = typeData.example;
+  if (typeData.examples !== undefined) schema.examples = typeData.examples;
+
+  return schema;
+}
+
+/**
+ * Convert RAML type to OAS schema
+ */
+function convertType(type: any): any {
+  const schema: any = {
+    type: type.type || 'object',
+  };
+
+  if (type.description) schema.description = type.description;
+  if (type.properties) {
+    schema.properties = {};
+    for (const prop of type.properties) {
+      schema.properties[prop.name] = convertParamType(prop);
+    }
+  }
+
+  if (type.required) {
+    schema.required = type.required;
+  }
+
+  return schema;
+}
+
+/**
+ * Convert RAML parameter type to OAS schema
+ */
+function convertParamType(param: any): any {
+  const schema: any = {
+    type: mapRamlTypeToOasType(param.type || 'string'),
+  };
+
+  if (param.description) schema.description = param.description;
+  if (param.enum) schema.enum = param.enum;
+  if (param.pattern) schema.pattern = param.pattern;
+  if (param.minLength !== undefined) schema.minLength = param.minLength;
+  if (param.maxLength !== undefined) schema.maxLength = param.maxLength;
+  if (param.minimum !== undefined) schema.minimum = param.minimum;
+  if (param.maximum !== undefined) schema.maximum = param.maximum;
+  if (param.default !== undefined) schema.default = param.default;
+  if (param.example !== undefined) schema.example = param.example;
+
+  return schema;
+}
+
+/**
+ * Convert RAML body schema to OAS schema
+ */
+function convertBodySchema(body: any): any {
+  // Debug
+  if (process.env.NODE_ENV !== 'production' && body && body.type) {
+    console.log('convertBodySchema - body.type:', typeof body.type, JSON.stringify(body.type).substring(0, 100));
+  }
+  
+  // If body is a string (type reference), return simple type
+  if (typeof body === 'string') {
+    return { type: mapRamlTypeToOasType(body) };
+  }
+
+  // If body has a type property
+  if (body.type) {
+    // If type is a string, convert it
+    if (typeof body.type === 'string') {
+      return convertDataType(body);
+    }
+    
+    // If type is already an object (expanded library type), return the whole body as schema
+    if (typeof body.type === 'object') {
+      return convertDataType(body);
+    }
+  }
+
+  // If body has schema property (JSON schema)
+  if (body.schema) {
+    try {
+      if (typeof body.schema === 'string') {
+        return JSON.parse(body.schema);
+      }
+      return body.schema;
+    } catch {
+      return { type: 'object' };
+    }
+  }
+
+  // If body has properties (inline type definition)
+  if (body.properties) {
+    return convertDataType(body);
+  }
+
+  // If body has example but no schema
+  if (body.example) {
+    return { 
+      type: 'object',
+      example: body.example 
+    };
+  }
+
+  return { type: 'object' };
+}
+
+/**
+ * Convert RAML security scheme to OAS security scheme
+ */
+function convertSecurityScheme(scheme: any): any {
+  const type = scheme.type?.toLowerCase();
+
+  switch (type) {
+    case 'oauth 2.0':
+      return {
+        type: 'oauth2',
+        flows: {
+          authorizationCode: {
+            authorizationUrl: scheme.settings?.authorizationUri || '',
+            tokenUrl: scheme.settings?.accessTokenUri || '',
+            scopes: scheme.settings?.scopes || {},
+          },
+        },
+      };
+    case 'basic authentication':
+      return {
+        type: 'http',
+        scheme: 'basic',
+      };
+    case 'digest authentication':
+      return {
+        type: 'http',
+        scheme: 'digest',
+      };
+    case 'pass through':
+      return {
+        type: 'apiKey',
+        in: 'header',
+        name: scheme.describedBy?.headers?.[0]?.name || 'Authorization',
+      };
+    default:
+      return {
+        type: 'apiKey',
+        in: 'header',
+        name: 'Authorization',
+      };
+  }
+}
+
+/**
+ * Map RAML types to OAS types
+ */
+function mapRamlTypeToOasType(ramlType: string): string {
+  const typeMap: { [key: string]: string } = {
+    string: 'string',
+    number: 'number',
+    integer: 'integer',
+    boolean: 'boolean',
+    date: 'string',
+    'date-only': 'string',
+    'time-only': 'string',
+    'datetime-only': 'string',
+    datetime: 'string',
+    file: 'string',
+    array: 'array',
+    object: 'object',
+  };
+
+  return typeMap[ramlType.toLowerCase()] || 'string';
+}
