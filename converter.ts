@@ -788,7 +788,21 @@ function resolveIncludes(content: string, files: FileMap, currentFile: string): 
           // Safety fix: Never allow 0-indent lines deep in the file
           const finalIndent = newIndent.length === 0 && result.length > 5 ? '  ' : newIndent;
           
-          result.push(finalIndent + contentLine.trim());
+          // Clean the content: remove invalid YAML syntax like <tagname>
+          let cleanedContent = contentLine.trim();
+          
+          // Remove <...> tags that are not valid YAML (like <status>, <200>, etc.)
+          const tagMatch = cleanedContent.match(/^([^:]+:\s*)(.+?)(\s*<[^>]+>)(.*)$/);
+          if (tagMatch) {
+            const [, keyPart, valuePart, tagPart, rest] = tagMatch;
+            const warningMsg = `⚠️ Removing invalid YAML tag from line: "${cleanedContent}"`;
+            console.warn(warningMsg);
+            logToFile(warningMsg);
+            cleanedContent = keyPart + valuePart + rest;
+            logToFile(`   Cleaned to: "${cleanedContent}"`);
+          }
+          
+          result.push(finalIndent + cleanedContent);
         } else {
           result.push(contentLine);
         }
