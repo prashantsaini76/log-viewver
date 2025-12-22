@@ -431,11 +431,24 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
             }
           } catch (e) {
             const errorMsg = `Failed to parse library ${libName} from ${libPath} in file: ${currentFile}`;
-            console.error(errorMsg, e);
+            console.error(errorMsg);
             
             // Add more context about the error
             if (e instanceof Error) {
-              console.error('Error details:', e.message);
+              console.error('YAML Parse Error:', e.message);
+              console.error('Error name:', e.name);
+              
+              // Show a snippet of the library content that failed to parse
+              const lines = libContent.split('\n');
+              console.error(`\nLibrary content (first 20 lines):`);
+              lines.slice(0, 20).forEach((line, idx) => {
+                console.error(`  ${idx + 1}: ${line}`);
+              });
+              
+              if (lines.length > 20) {
+                console.error(`  ... and ${lines.length - 20} more lines`);
+              }
+              
               if (e.message.includes('unknown tag')) {
                 console.error('\n💡 Tip: This library may contain unresolved !include directives or RAML-specific syntax.');
               }
@@ -444,7 +457,7 @@ function resolveLibraries(content: string, files: FileMap, currentFile: string):
               }
             }
             
-            throw new Error(errorMsg);
+            throw new Error(`${errorMsg}\nOriginal error: ${e instanceof Error ? e.message : String(e)}`);
           }
         } else {
           const errorMsg = `Library file not found: ${libName} at path ${libPath} (referenced in file: ${currentFile})`;
