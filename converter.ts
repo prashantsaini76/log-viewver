@@ -1430,9 +1430,17 @@ function convertResource(path: string, resource: any, paths: any, parentPath: st
   // Add path-level summary and description if available
   if (resource.displayName) {
     paths[fullPath].summary = resource.displayName;
+  } else {
+    // Generate a default summary from the path
+    const pathName = fullPath.split('/').filter(p => p && !p.startsWith('{')).pop() || 'Resource';
+    paths[fullPath].summary = pathName.charAt(0).toUpperCase() + pathName.slice(1);
   }
+  
   if (resource.description) {
     paths[fullPath].description = resource.description;
+  } else {
+    // Add default description
+    paths[fullPath].description = `Operations for ${fullPath}`;
   }
   
   // Extract URI parameters from path (like /{id} or /{userId})
