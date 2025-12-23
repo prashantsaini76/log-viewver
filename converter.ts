@@ -1592,9 +1592,25 @@ function convertDataType(typeData: any): any {
           // Handle array types like "object[]"
           if (t.endsWith('[]')) {
             const itemType = t.slice(0, -2).trim();
+            const mappedItemType = mapRamlTypeToOasType(itemType);
+            const items: any = { 
+              type: mappedItemType, 
+              deprecated: false, 
+              nullable: true 
+            };
+            // Add string properties to items
+            if (mappedItemType === 'string') {
+              items.minLength = 0;
+              items.maxLength = 255;
+              items.pattern = '^.*$';
+            }
+            // Add additionalProperties to object items
+            if (mappedItemType === 'object') {
+              items.additionalProperties = false;
+            }
             return {
               type: 'array',
-              items: { type: mapRamlTypeToOasType(itemType), deprecated: false, nullable: true },
+              items: items,
               deprecated: false,
               nullable: true,
               minItems: 0,
@@ -1611,6 +1627,11 @@ function convertDataType(typeData: any): any {
           if (mappedType === 'string') {
             schema.minLength = 0;
             schema.maxLength = 255;
+            schema.pattern = '^.*$';  // Default pattern to match anything
+          }
+          // Add additionalProperties for objects
+          if (mappedType === 'object') {
+            schema.additionalProperties = false;
           }
           return schema;
         })
@@ -1626,12 +1647,24 @@ function convertDataType(typeData: any): any {
     if (mappedType === 'string') {
       schema.minLength = 0;
       schema.maxLength = 255;
+      schema.pattern = '^.*$';  // Default pattern to match anything
     }
     // Add array defaults
     if (mappedType === 'array') {
       schema.minItems = 0;
       schema.maxItems = 100;
-      schema.items = { type: 'string', deprecated: false, nullable: true };
+      schema.items = { 
+        type: 'string', 
+        deprecated: false, 
+        nullable: true,
+        minLength: 0,
+        maxLength: 255,
+        pattern: '^.*$'
+      };
+    }
+    // Add additionalProperties for objects
+    if (mappedType === 'object') {
+      schema.additionalProperties = false;
     }
     return schema;
   }
@@ -1646,9 +1679,25 @@ function convertDataType(typeData: any): any {
         // Handle array types like "object[]"
         if (t.endsWith('[]')) {
           const itemType = t.slice(0, -2).trim();
+          const mappedItemType = mapRamlTypeToOasType(itemType);
+          const items: any = { 
+            type: mappedItemType, 
+            deprecated: false, 
+            nullable: true 
+          };
+          // Add string properties to items
+          if (mappedItemType === 'string') {
+            items.minLength = 0;
+            items.maxLength = 255;
+            items.pattern = '^.*$';
+          }
+          // Add additionalProperties to object items
+          if (mappedItemType === 'object') {
+            items.additionalProperties = false;
+          }
           return {
             type: 'array',
-            items: { type: mapRamlTypeToOasType(itemType), deprecated: false, nullable: true },
+            items: items,
             deprecated: false,
             nullable: true,
             minItems: 0,
@@ -1665,6 +1714,11 @@ function convertDataType(typeData: any): any {
         if (mappedType === 'string') {
           unionSchema.minLength = 0;
           unionSchema.maxLength = 255;
+          unionSchema.pattern = '^.*$';  // Default pattern to match anything
+        }
+        // Add additionalProperties for objects
+        if (mappedType === 'object') {
+          unionSchema.additionalProperties = false;
         }
         return unionSchema;
       });
@@ -1691,6 +1745,11 @@ function convertDataType(typeData: any): any {
   
   // Add nullable property based on required field (if not required, it's nullable)
   schema.nullable = typeData.required === false || typeData.required === undefined;
+  
+  // Add additionalProperties: false for object types
+  if (schema.type === 'object') {
+    schema.additionalProperties = false;
+  }
   
   if (typeData.properties) {
     schema.properties = {};
@@ -1721,6 +1780,14 @@ function convertDataType(typeData: any): any {
   if (schema.type === 'string') {
     schema.minLength = typeData.minLength !== undefined ? typeData.minLength : 0;
     schema.maxLength = typeData.maxLength !== undefined ? typeData.maxLength : 255;
+    
+    // Add pattern - use RAML pattern if present, otherwise default to match anything
+    if (typeData.pattern) {
+      schema.pattern = typeData.pattern;
+    } else if (!typeData.enum) {
+      // Only add default pattern if there's no enum (enum takes precedence)
+      schema.pattern = '^.*$';
+    }
   } else {
     if (typeData.minLength !== undefined) schema.minLength = typeData.minLength;
     if (typeData.maxLength !== undefined) schema.maxLength = typeData.maxLength;
@@ -1805,18 +1872,24 @@ function convertBodySchema(body: any): any {
 
   // If body has a type property
   if (body.type) {
+    let schema: any;
+    
     // If type is a string, convert it
     if (typeof body.type === 'string') {
-      return convertDataType(body);
+      schema = convertDataType(body);
+    } else if (typeof body.type === 'object') {
+      // If type is already an object (expanded library type from resolveLibraries)
+      // The structure after expansion is: { type: { type: 'object', properties: {...} } }
+      // We need to return the inner type object directly
+      schema = convertDataType(body.type);
     }
     
-    // If type is already an object (expanded library type from resolveLibraries)
-    // The structure after expansion is: { type: { type: 'object', properties: {...} } }
-    // We need to return the inner type object directly
-    if (typeof body.type === 'object') {
-      // The body.type is already the schema we want (from library type expansion)
-      return convertDataType(body.type);
+    // Add example if present in body (for external example files like !include examples/user.json)
+    if (body.example !== undefined && schema) {
+      schema.example = body.example;
     }
+    
+    if (schema) return schema;
   }
 
   // If body has schema property (JSON schema)
@@ -1833,7 +1906,12 @@ function convertBodySchema(body: any): any {
 
   // If body has properties (inline type definition)
   if (body.properties) {
-    return convertDataType(body);
+    const schema = convertDataType(body);
+    // Add example if present
+    if (body.example !== undefined) {
+      schema.example = body.example;
+    }
+    return schema;
   }
 
   // If body has example but no schema
