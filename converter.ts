@@ -1301,7 +1301,49 @@ function convertRamlToOasSpec(ramlData: any): any {
     paths: {},
     components: {
       schemas: {},
-      securitySchemes: {},
+      securitySchemes: {
+        oauth_2: {
+          type: 'oauth2',
+          description: 'OAuth 2.0 authentication',
+          flows: {
+            authorizationCode: {
+              authorizationUrl: 'https://example.com/oauth/authorize',
+              tokenUrl: 'https://example.com/oauth/token',
+              scopes: {
+                'read': 'Read access',
+                'write': 'Write access'
+              }
+            }
+          }
+        }
+      },
+      headers: {
+        'Cache-Control': {
+          description: '',
+          example: 'no-cache, no-store, must-revalidate',
+          schema: {
+            type: 'string',
+            default: 'no-cache, no-store, must-revalidate',
+            deprecated: false,
+            nullable: false,
+            minLength: 8,
+            maxLength: 35,
+            pattern: '^no-cache, no-store, must-revalidate$'
+          }
+        },
+        'Location': {
+          description: 'Location of newly created resource',
+          example: '/resourceName/12345',
+          schema: {
+            type: 'string',
+            deprecated: false,
+            nullable: false,
+            minLength: 1,
+            maxLength: 255,
+            pattern: '^[A-Za-z0-9\\/_-]{1,255}$'
+          }
+        }
+      }
     },
   };
 
@@ -1574,6 +1616,14 @@ function convertMethod(methodData: any, methodName?: string, resourcePath?: stri
       const responseData = methodData.responses[statusCode];
       operation.responses[statusCode] = {
         description: responseData.description || `Response ${statusCode}`,
+        headers: {
+          'Cache-Control': {
+            $ref: '#/components/headers/Cache-Control'
+          },
+          'Location': {
+            $ref: '#/components/headers/Location'
+          }
+        }
       };
 
       if (responseData.body) {
@@ -1603,6 +1653,14 @@ function convertMethod(methodData: any, methodName?: string, resourcePath?: stri
   if (Object.keys(operation.responses).length === 0) {
     operation.responses['200'] = {
       description: 'Success',
+      headers: {
+        'Cache-Control': {
+          $ref: '#/components/headers/Cache-Control'
+        },
+        'Location': {
+          $ref: '#/components/headers/Location'
+        }
+      }
     };
   }
 
