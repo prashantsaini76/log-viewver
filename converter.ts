@@ -1476,12 +1476,14 @@ function convertMethod(methodData: any, methodName?: string, resourcePath?: stri
     operation.parameters = [];
     for (const paramName in pathParams) {
       const param = pathParams[paramName];
+      const schema = convertParamType(param);
       operation.parameters.push({
         name: paramName,
         in: 'path',
         required: true,
         description: param.description || '',
-        schema: convertParamType(param),
+        schema: schema,
+        example: param.example !== undefined ? param.example : generateDefaultExample(paramName, schema.type, 'path')
       });
     }
   }
@@ -1491,12 +1493,14 @@ function convertMethod(methodData: any, methodName?: string, resourcePath?: stri
     if (!operation.parameters) operation.parameters = [];
     for (const paramName in methodData.queryParameters) {
       const param = methodData.queryParameters[paramName];
+      const schema = convertParamType(param);
       operation.parameters.push({
         name: paramName,
         in: 'query',
         required: param.required || false,
         description: param.description || '',
-        schema: convertParamType(param),
+        schema: schema,
+        example: param.example !== undefined ? param.example : generateDefaultExample(paramName, schema.type, 'query')
       });
     }
   }
@@ -1509,12 +1513,14 @@ function convertMethod(methodData: any, methodName?: string, resourcePath?: stri
       const alreadyAdded = operation.parameters.some((p: any) => p.name === paramName && p.in === 'path');
       if (!alreadyAdded) {
         const param = methodData.uriParameters[paramName];
+        const schema = convertParamType(param);
         operation.parameters.push({
           name: paramName,
           in: 'path',
           required: true,
           description: param.description || '',
-          schema: convertParamType(param),
+          schema: schema,
+          example: param.example !== undefined ? param.example : generateDefaultExample(paramName, schema.type, 'path')
         });
       }
     }
@@ -1525,12 +1531,14 @@ function convertMethod(methodData: any, methodName?: string, resourcePath?: stri
     if (!operation.parameters) operation.parameters = [];
     for (const headerName in methodData.headers) {
       const header = methodData.headers[headerName];
+      const schema = convertParamType(header);
       operation.parameters.push({
         name: headerName,
         in: 'header',
         required: header.required || false,
         description: header.description || '',
-        schema: convertParamType(header),
+        schema: schema,
+        example: header.example !== undefined ? header.example : generateDefaultExample(headerName, schema.type, 'header')
       });
     }
   }
@@ -1855,6 +1863,49 @@ function convertType(type: any): any {
   }
 
   return schema;
+}
+
+/**
+ * Generate a default example value based on parameter type and name
+ */
+function generateDefaultExample(paramName: string, paramType: string, paramIn: string): any {
+  // Specific examples based on common parameter names
+  const lowerName = paramName.toLowerCase();
+  
+  if (paramIn === 'header') {
+    if (lowerName === 'authorization') return 'Bearer <token>';
+    if (lowerName === 'content-type') return 'application/json';
+    if (lowerName.includes('token')) return '<token>';
+    return 'header-value';
+  }
+  
+  if (paramIn === 'path') {
+    if (lowerName.includes('id')) return 'id123';
+    if (lowerName.includes('user')) return 'user123';
+    if (lowerName.includes('order')) return 'order123';
+    return 'value';
+  }
+  
+  // Generate based on type
+  switch (paramType) {
+    case 'string':
+      if (lowerName.includes('email')) return 'user@example.com';
+      if (lowerName.includes('name')) return 'John Doe';
+      if (lowerName.includes('page')) return '1';
+      if (lowerName.includes('size') || lowerName.includes('limit')) return '10';
+      return 'string-value';
+    case 'integer':
+    case 'number':
+      if (lowerName.includes('page')) return 1;
+      if (lowerName.includes('size') || lowerName.includes('limit')) return 10;
+      return 0;
+    case 'boolean':
+      return true;
+    case 'array':
+      return [];
+    default:
+      return 'value';
+  }
 }
 
 /**
