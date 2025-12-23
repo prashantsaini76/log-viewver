@@ -1543,9 +1543,20 @@ function convertMethod(methodData: any, methodName?: string, resourcePath?: stri
 
     for (const contentType in methodData.body) {
       const bodyData = methodData.body[contentType];
-      operation.requestBody.content[contentType] = {
-        schema: convertBodySchema(bodyData),
+      const mediaTypeObject: any = {
+        schema: convertBodySchema(bodyData, false), // false = don't include example in schema
       };
+      
+      // Add examples at media type level (not in schema)
+      if (bodyData.example !== undefined) {
+        mediaTypeObject.examples = {
+          example1: {
+            value: bodyData.example
+          }
+        };
+      }
+      
+      operation.requestBody.content[contentType] = mediaTypeObject;
     }
   }
 
@@ -1561,9 +1572,20 @@ function convertMethod(methodData: any, methodName?: string, resourcePath?: stri
         operation.responses[statusCode].content = {};
         for (const contentType in responseData.body) {
           const bodyData = responseData.body[contentType];
-          operation.responses[statusCode].content[contentType] = {
-            schema: convertBodySchema(bodyData),
+          const mediaTypeObject: any = {
+            schema: convertBodySchema(bodyData, false), // false = don't include example in schema
           };
+          
+          // Add examples at media type level (not in schema)
+          if (bodyData.example !== undefined) {
+            mediaTypeObject.examples = {
+              example1: {
+                value: bodyData.example
+              }
+            };
+          }
+          
+          operation.responses[statusCode].content[contentType] = mediaTypeObject;
         }
       }
     }
@@ -1859,7 +1881,7 @@ function convertParamType(param: any): any {
 /**
  * Convert RAML body schema to OAS schema
  */
-function convertBodySchema(body: any): any {
+function convertBodySchema(body: any, includeExampleInSchema: boolean = true): any {
   // Debug
   if (process.env.NODE_ENV !== 'production' && body && body.type) {
     console.log('convertBodySchema - body.type:', typeof body.type, JSON.stringify(body.type).substring(0, 100));
@@ -1884,8 +1906,9 @@ function convertBodySchema(body: any): any {
       schema = convertDataType(body.type);
     }
     
-    // Add example if present in body (for external example files like !include examples/user.json)
-    if (body.example !== undefined && schema) {
+    // Add example if present in body AND includeExampleInSchema is true
+    // (for external example files like !include examples/user.json)
+    if (body.example !== undefined && schema && includeExampleInSchema) {
       schema.example = body.example;
     }
     
@@ -1907,15 +1930,15 @@ function convertBodySchema(body: any): any {
   // If body has properties (inline type definition)
   if (body.properties) {
     const schema = convertDataType(body);
-    // Add example if present
-    if (body.example !== undefined) {
+    // Add example if present AND includeExampleInSchema is true
+    if (body.example !== undefined && includeExampleInSchema) {
       schema.example = body.example;
     }
     return schema;
   }
 
   // If body has example but no schema
-  if (body.example) {
+  if (body.example && includeExampleInSchema) {
     return { 
       type: 'object',
       example: body.example 
