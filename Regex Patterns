@@ -1,2 +1,3 @@
-try 1
-pattern: '^([a-zA-Z0-9 \-;&\/+''%=\u003F,\u007C\u0022\u003A._! $\u005E*+=_@\u003C\u003E\u005B\u005D\u007B\u007D]{1,255})$'
+maximum permissive regex
+
+^[a-zA-Z0-9 .,!$%*+=_@&;/'()-]{1,255}$
