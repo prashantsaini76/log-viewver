@@ -2129,3 +2129,826 @@ function mapRamlTypeToOasType(ramlType: string): string {
 
   return typeMap[ramlType.toLowerCase()] || 'string';
 }
+
+/**
+ * Flatten a RAML project with multiple files into a single RAML file
+ * by resolving all !include directives and library references
+ */
+export async function flattenRaml(
+  files: { [key: string]: string },
+  mainRamlFile: string
+): Promise<string> {
+  try {
+    // Get the main RAML content
+    let mainContent = files[mainRamlFile];
+    
+    if (!mainContent) {
+      throw new Error(`Main RAML file not found: ${mainRamlFile}`);
+    }
+    
+    // Resolve all includes
+    mainContent = resolveIncludes(mainContent, files, mainRamlFile);
+    
+    // Fix YAML structure issues
+    mainContent = autoFixYamlStructure(mainContent);
+    
+    // Parse the RAML
+    const ramlObj = yaml.load(mainContent) as any;
+    
+    // If there are library references, inline them
+    if (ramlObj.uses) {
+      const libraries = ramlObj.uses;
+      
+      // Inline all library types into the main types section
+      if (!ramlObj.types) {
+        ramlObj.types = {};
+      }
+      
+      // Process each library
+      for (const [libName, libPath] of Object.entries(libraries)) {
+        if (typeof libPath !== 'string') continue;
+        
+        // Find the library file path
+        const libFilePath = libPath.replace(/^\//, '');
+        let libraryContent = files[libFilePath];
+        
+        if (!libraryContent) {
+          // Try to find relative to main file
+          const mainDir = mainRamlFile.substring(0, mainRamlFile.lastIndexOf('/') + 1);
+          const relativePath = mainDir + libFilePath;
+          libraryContent = files[relativePath];
+        }
+        
+        if (libraryContent) {
+          // Resolve includes in the library
+          libraryContent = resolveIncludes(libraryContent, files, libFilePath);
+          libraryContent = autoFixYamlStructure(libraryContent);
+          const libraryObj = yaml.load(libraryContent) as any;
+          
+          // Inline library types with library name prefix
+          if (libraryObj.types) {
+            for (const [typeName, typeDef] of Object.entries(libraryObj.types)) {
+              const fullTypeName = `${libName}.${typeName}`;
+              ramlObj.types[fullTypeName] = typeDef;
+            }
+          }
+          
+          // Inline library traits
+          if (libraryObj.traits) {
+            if (!ramlObj.traits) {
+              ramlObj.traits = {};
+            }
+            for (const [traitName, traitDef] of Object.entries(libraryObj.traits)) {
+              const fullTraitName = `${libName}.${traitName}`;
+              ramlObj.traits[fullTraitName] = traitDef;
+            }
+          }
+        }
+      }
+      
+      // Remove the uses block after inlining
+      delete ramlObj.uses;
+    }
+    
+    // Inline all trait definitions that were in separate files
+    if (ramlObj.traits) {
+      const inlinedTraits: any = {};
+      for (const [traitName, traitDef] of Object.entries(ramlObj.traits)) {
+        inlinedTraits[traitName] = traitDef;
+      }
+      ramlObj.traits = inlinedTraits;
+    }
+    
+    // Convert back to YAML
+    const flattenedYaml = yaml.dump(ramlObj, {
+      indent: 2,
+      lineWidth: -1,
+      noRefs: true,
+      sortKeys: false,
+    });
+    
+    // Add RAML version header if not present
+    const ramlVersion = ramlObj.title ? '#%RAML 1.0\n' : '#%RAML 0.8\n';
+    const finalRaml = flattenedYaml.startsWith('#%RAML') 
+      ? flattenedYaml 
+      : ramlVersion + flattenedYaml;
+    
+    return finalRaml;
+  } catch (error: any) {
+    throw new Error(`Failed to flatten RAML: ${error.message}`);
+  }
+}
+
+/**
+ * Flatten an OpenAPI specification with multiple files into a single file
+ * by resolving all $ref references to external files
+ */
+export async function flattenOas(
+  files: { [key: string]: string },
+  mainOasFile: string
+): Promise<string> {
+  try {
+    // Get the main OAS content
+    let mainContent = files[mainOasFile];
+    
+    if (!mainContent) {
+      throw new Error(`Main OpenAPI file not found: ${mainOasFile}`);
+    }
+
+    // Parse the OAS (could be JSON or YAML)
+    let oasObj: any;
+    if (mainOasFile.endsWith('.json')) {
+      oasObj = JSON.parse(mainContent);
+    } else {
+      oasObj = yaml.load(mainContent) as any;
+    }
+
+    // Recursively resolve all $ref references
+    const resolveRefs = (obj: any, currentPath: string): any => {
+      if (obj === null || obj === undefined) {
+        return obj;
+      }
+
+      if (Array.isArray(obj)) {
+        return obj.map(item => resolveRefs(item, currentPath));
+      }
+
+      if (typeof obj === 'object') {
+        // Check if this object has a $ref
+        if (obj.$ref && typeof obj.$ref === 'string') {
+          const ref = obj.$ref;
+          
+          // Handle external file references (not internal #/components/... refs)
+          if (!ref.startsWith('#/')) {
+            // Split reference into file path and internal path
+            const [filePath, internalPath] = ref.split('#');
+            
+            if (filePath) {
+              // Resolve the file path relative to current file
+              const currentDir = currentPath.substring(0, currentPath.lastIndexOf('/') + 1);
+              let resolvedPath = filePath.startsWith('./') || filePath.startsWith('../')
+                ? currentDir + filePath
+                : filePath;
+              
+              // Normalize path (remove ./ and ../)
+              const parts = resolvedPath.split('/');
+              const normalized: string[] = [];
+              for (const part of parts) {
+                if (part === '..') {
+                  normalized.pop();
+                } else if (part !== '.' && part !== '') {
+                  normalized.push(part);
+                }
+              }
+              resolvedPath = normalized.join('/');
+
+              // Load the referenced file
+              let refContent = files[resolvedPath];
+              if (!refContent) {
+                console.warn(`Referenced file not found: ${resolvedPath}`);
+                return obj; // Return original ref if file not found
+              }
+
+              // Parse the referenced file
+              let refObj: any;
+              if (resolvedPath.endsWith('.json')) {
+                refObj = JSON.parse(refContent);
+              } else {
+                refObj = yaml.load(refContent) as any;
+              }
+
+              // If there's an internal path (e.g., #/components/schemas/User), navigate to it
+              if (internalPath) {
+                const pathParts = internalPath.split('/').filter((p: string) => p);
+                let target = refObj;
+                for (const part of pathParts) {
+                  target = target?.[part];
+                }
+                refObj = target;
+              }
+
+              // Recursively resolve refs in the loaded content
+              return resolveRefs(refObj, resolvedPath);
+            }
+          }
+          
+          // For internal refs (#/components/...), keep them as-is
+          return obj;
+        }
+
+        // Recursively process all properties
+        const result: any = {};
+        for (const [key, value] of Object.entries(obj)) {
+          result[key] = resolveRefs(value, currentPath);
+        }
+        return result;
+      }
+
+      return obj;
+    };
+
+    // Resolve all external references
+    const flattenedObj = resolveRefs(oasObj, mainOasFile);
+
+    // Convert back to YAML
+    const flattenedYaml = yaml.dump(flattenedObj, {
+      indent: 2,
+      lineWidth: -1,
+      noRefs: true,
+      sortKeys: false,
+    });
+
+    return flattenedYaml;
+  } catch (error: any) {
+    throw new Error(`Failed to flatten OpenAPI: ${error.message}`);
+  }
+}
+
+/**
+ * Validate a payload against OpenAPI specification
+ */
+export async function validatePayload(
+  files: { [key: string]: string },
+  mainOasFile: string,
+  options: {
+    payload: any;
+    path: string;
+    method: string;
+    type: 'request' | 'response';
+  }
+): Promise<{ valid: boolean; errors: any[] }> {
+  try {
+    console.log('Starting validation...');
+    console.log('Files:', Object.keys(files));
+    console.log('Main file:', mainOasFile);
+    console.log('Options:', options);
+    
+    const { payload, path, method, type } = options;
+    const errors: any[] = [];
+
+    // Get the main OAS content
+    let mainContent = files[mainOasFile];
+    
+    if (!mainContent) {
+      throw new Error(`Main OpenAPI file not found: ${mainOasFile}`);
+    }
+
+    console.log('Parsing OAS...');
+    // Parse the OAS (could be JSON or YAML)
+    let oasObj: any;
+    if (mainOasFile.endsWith('.json')) {
+      oasObj = JSON.parse(mainContent);
+    } else {
+      oasObj = yaml.load(mainContent) as any;
+    }
+
+    console.log('OAS paths:', Object.keys(oasObj.paths || {}));
+
+    // DON'T resolve all refs upfront - it can cause infinite loops
+    // Instead, resolve refs only when needed for the specific path
+
+    // Find the path in OAS
+    const paths = oasObj.paths || {};
+    let pathDef = paths[path];
+
+    console.log('Looking for path:', path);
+    console.log('Found pathDef:', pathDef ? 'yes' : 'no');
+
+    // If exact path not found, try to match path parameters
+    if (!pathDef) {
+      const pathKeys = Object.keys(paths);
+      for (const key of pathKeys) {
+        // Convert OAS path template to regex (e.g., /users/{id} -> /users/[^/]+)
+        const pattern = key.replace(/\{[^}]+\}/g, '[^/]+');
+        const regex = new RegExp(`^${pattern}$`);
+        if (regex.test(path)) {
+          pathDef = paths[key];
+          break;
+        }
+      }
+    }
+
+    if (!pathDef) {
+      errors.push({
+        field: 'path',
+        message: `Path '${path}' not found in OpenAPI specification. Available paths: ${Object.keys(paths).join(', ')}`,
+        value: path
+      });
+      return { valid: false, errors };
+    }
+
+    // Resolve path-level $ref if present
+    if (pathDef.$ref) {
+      console.log('Resolving path $ref:', pathDef.$ref);
+      pathDef = resolveRef(pathDef.$ref, oasObj, files, mainOasFile);
+      console.log('Resolved pathDef methods:', Object.keys(pathDef));
+    }
+
+    // Get the method definition
+    const methodDef = pathDef[method.toLowerCase()];
+    console.log('Looking for method:', method.toLowerCase());
+    console.log('Found methodDef:', methodDef ? 'yes' : 'no');
+    
+    if (!methodDef) {
+      const availableMethods = Object.keys(pathDef).filter(k => 
+        ['get', 'post', 'put', 'patch', 'delete', 'options', 'head'].includes(k.toLowerCase())
+      );
+      errors.push({
+        field: 'method',
+        message: `Method '${method}' not defined for path '${path}'. Available methods: ${availableMethods.join(', ')}`,
+        value: method,
+        expected: availableMethods
+      });
+      return { valid: false, errors };
+    }
+
+    // Get the schema to validate against
+    let schema: any;
+    console.log('Getting schema for type:', type);
+    
+    if (type === 'request') {
+      // Validate request body
+      let requestBody = methodDef.requestBody;
+      console.log('RequestBody:', requestBody ? 'found' : 'not found');
+      
+      if (!requestBody) {
+        errors.push({
+          field: 'requestBody',
+          message: `No request body defined for ${method} ${path}`,
+          value: null
+        });
+        return { valid: false, errors };
+      }
+
+      // Resolve requestBody $ref if present (e.g., #/components/requestBodies/ManagePartyPostReq)
+      if (requestBody.$ref) {
+        console.log('Resolving requestBody $ref:', requestBody.$ref);
+        requestBody = resolveRef(requestBody.$ref, oasObj, files, mainOasFile);
+        console.log('RequestBody resolved');
+      }
+
+      const content = requestBody.content || {};
+      const jsonContent = content['application/json'];
+      console.log('JSON content:', jsonContent ? 'found' : 'not found');
+      
+      if (!jsonContent || !jsonContent.schema) {
+        errors.push({
+          field: 'schema',
+          message: `No JSON schema defined for request body of ${method} ${path}`,
+          value: null
+        });
+        return { valid: false, errors };
+      }
+
+      schema = jsonContent.schema;
+      console.log('Schema has $ref?', schema.$ref ? 'yes: ' + schema.$ref : 'no');
+    } else {
+      // Validate response body
+      const responses = methodDef.responses || {};
+      // Try to find a success response (200, 201, etc.)
+      const successCode = Object.keys(responses).find(code => code.startsWith('2'));
+      if (!successCode) {
+        errors.push({
+          field: 'response',
+          message: `No success response defined for ${method} ${path}`,
+          value: null
+        });
+        return { valid: false, errors };
+      }
+
+      let responseDef = responses[successCode];
+      
+      // Resolve response $ref if present (e.g., #/components/responses/SuccessResponse)
+      if (responseDef.$ref) {
+        console.log('Resolving response $ref:', responseDef.$ref);
+        responseDef = resolveRef(responseDef.$ref, oasObj, files, mainOasFile);
+        console.log('Response resolved');
+      }
+      
+      const content = responseDef.content || {};
+      const jsonContent = content['application/json'];
+      if (!jsonContent || !jsonContent.schema) {
+        errors.push({
+          field: 'schema',
+          message: `No JSON schema defined for response of ${method} ${path}`,
+          value: null
+        });
+        return { valid: false, errors };
+      }
+
+      schema = jsonContent.schema;
+    }
+
+    // Resolve $ref if present
+    console.log('About to resolve schema $ref...');
+    if (schema.$ref) {
+      console.log('Resolving schema $ref:', schema.$ref);
+      schema = resolveRef(schema.$ref, oasObj, files, mainOasFile);
+      console.log('Schema resolved, has properties?', schema.properties ? 'yes' : 'no');
+    }
+
+    // Validate payload against schema
+    console.log('Starting validateAgainstSchema...');
+    validateAgainstSchema(payload, schema, '', errors, oasObj, files, mainOasFile);
+    console.log('Validation complete, errors:', errors.length);
+
+    return {
+      valid: errors.length === 0,
+      errors
+    };
+  } catch (error: any) {
+    console.error('Validation error:', error);
+    throw new Error(`Failed to validate payload: ${error.message}`);
+  }
+}
+
+/**
+ * Recursively resolve all $refs in an object
+ */
+function resolveAllRefs(obj: any, rootObj: any, files: { [key: string]: string }, mainFile: string, visited: Set<string> = new Set(), depth: number = 0): any {
+  // Prevent stack overflow
+  if (depth > 50) {
+    console.warn('Maximum recursion depth reached in resolveAllRefs');
+    return obj;
+  }
+
+  if (!obj || typeof obj !== 'object') {
+    return obj;
+  }
+
+  // Handle arrays
+  if (Array.isArray(obj)) {
+    return obj.map(item => resolveAllRefs(item, rootObj, files, mainFile, visited, depth + 1));
+  }
+
+  // Handle objects with $ref
+  if (obj.$ref) {
+    const ref = obj.$ref;
+    
+    // Prevent infinite loops
+    if (visited.has(ref)) {
+      console.warn(`Circular reference detected: ${ref}`);
+      return {}; // Return empty object instead of the ref
+    }
+    
+    visited.add(ref);
+    const resolved = resolveRef(ref, rootObj, files, mainFile);
+    
+    // Recursively resolve the resolved object
+    return resolveAllRefs(resolved, rootObj, files, mainFile, visited, depth + 1);
+  }
+
+  // Recursively resolve all properties
+  const result: any = {};
+  for (const key in obj) {
+    if (obj.hasOwnProperty(key)) {
+      result[key] = resolveAllRefs(obj[key], rootObj, files, mainFile, visited, depth + 1);
+    }
+  }
+  
+  return result;
+}
+
+/**
+ * Resolve a $ref reference in OAS
+ */
+function resolveRef(ref: string, oasObj: any, files: { [key: string]: string }, mainFile: string): any {
+  if (ref.startsWith('#/')) {
+    // Internal reference (e.g., #/components/schemas/User)
+    const parts = ref.substring(2).split('/');
+    let result = oasObj;
+    for (const part of parts) {
+      result = result[part];
+      if (!result) {
+        console.warn(`Could not resolve reference: ${ref}`);
+        return {};
+      }
+    }
+    return result;
+  }
+  
+  // External file reference (e.g., ./schemas/User.yaml#/User or ./paths/orders.yaml)
+  if (ref.includes('#') || ref.startsWith('./') || ref.startsWith('../')) {
+    console.log('Resolving external ref:', ref);
+    let filePath = ref;
+    let jsonPath = '';
+    
+    // Split ref if it contains #
+    if (ref.includes('#')) {
+      [filePath, jsonPath] = ref.split('#');
+    }
+    
+    // Resolve relative file path
+    const mainDir = mainFile.substring(0, mainFile.lastIndexOf('/') + 1) || '';
+    console.log('Main dir:', mainDir);
+    console.log('File path:', filePath);
+    
+    // Normalize path: resolve ./ and ../
+    let fullPath = mainDir + filePath;
+    console.log('Full path before normalization:', fullPath);
+    
+    // Remove leading ./
+    fullPath = fullPath.replace(/^\.\//, '');
+    
+    // Resolve ../ - split path and process each segment
+    const pathParts = fullPath.split('/');
+    const normalizedParts: string[] = [];
+    
+    for (const part of pathParts) {
+      if (part === '..') {
+        // Go up one directory - remove last part
+        if (normalizedParts.length > 0) {
+          normalizedParts.pop();
+        }
+      } else if (part !== '.' && part !== '') {
+        normalizedParts.push(part);
+      }
+    }
+    
+    fullPath = normalizedParts.join('/');
+    console.log('Full path after normalization:', fullPath);
+    
+    // Try multiple path variations
+    let fileContent = files[fullPath] || files[filePath.replace(/^\.\.\//, '').replace(/^\.\//, '')] || files[filePath];
+    console.log('File content found?', fileContent ? 'yes' : 'no');
+    console.log('Trying to find:', fullPath);
+    
+    if (!fileContent) {
+      console.warn(`Could not find external reference file: ${ref}`);
+      console.warn(`Tried paths: ${fullPath}, ${filePath.replace(/^\.\//, '')}, ${filePath}`);
+      console.warn(`Available files:`, Object.keys(files));
+      return {};
+    }
+    
+    console.log('Parsing external file...');
+    try {
+      // Parse the external file
+      let externalObj: any;
+      if (filePath.endsWith('.json')) {
+        externalObj = JSON.parse(fileContent);
+      } else {
+        externalObj = yaml.load(fileContent) as any;
+      }
+      
+      // Navigate to the specific path if provided
+      if (jsonPath) {
+        const parts = jsonPath.substring(1).split('/'); // Remove leading '/'
+        let result = externalObj;
+        for (const part of parts) {
+          result = result[part];
+          if (!result) {
+            console.warn(`Could not resolve path in external file: ${jsonPath}`);
+            return {};
+          }
+        }
+        return result;
+      }
+      
+      return externalObj;
+    } catch (error) {
+      console.warn(`Could not parse external reference file: ${fullPath}`, error);
+      return {};
+    }
+  }
+  
+  console.warn(`Unsupported reference format: ${ref}`);
+  return {};
+}
+
+/**
+ * Validate a value against an OAS schema
+ */
+function validateAgainstSchema(
+  value: any,
+  schema: any,
+  path: string,
+  errors: any[],
+  oasObj: any,
+  files: { [key: string]: string },
+  mainFile: string,
+  depth: number = 0
+): void {
+  // Prevent infinite recursion
+  if (depth > 100) {
+    console.warn('Maximum validation depth reached at path:', path);
+    return;
+  }
+  
+  console.log(`Validating at path: ${path || 'root'}, depth: ${depth}`);
+  
+  // Resolve $ref if present
+  if (schema.$ref) {
+    console.log(`Resolving $ref at ${path}: ${schema.$ref}`);
+    schema = resolveRef(schema.$ref, oasObj, files, mainFile);
+  }
+
+  const currentPath = path || 'root';
+
+  // Check type
+  const expectedType = schema.type;
+  const actualType = Array.isArray(value) ? 'array' : typeof value;
+
+  if (expectedType && expectedType !== actualType) {
+    if (!(expectedType === 'integer' && actualType === 'number')) {
+      errors.push({
+        field: currentPath,
+        message: `Expected type '${expectedType}' but got '${actualType}'`,
+        value: value,
+        expected: expectedType
+      });
+      return;
+    }
+  }
+
+  // Validate based on type
+  if (expectedType === 'object' || schema.properties) {
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      errors.push({
+        field: currentPath,
+        message: `Expected object but got ${Array.isArray(value) ? 'array' : typeof value}`,
+        value: value
+      });
+      return;
+    }
+
+    // Check required properties
+    const required = schema.required || [];
+    for (const prop of required) {
+      if (!(prop in value)) {
+        errors.push({
+          field: `${currentPath}.${prop}`,
+          message: `Required property '${prop}' is missing`,
+          value: undefined,
+          expected: 'required'
+        });
+      }
+    }
+
+    // Validate each property
+    const properties = schema.properties || {};
+    for (const [prop, propSchema] of Object.entries(properties)) {
+      if (prop in value) {
+        validateAgainstSchema(
+          value[prop],
+          propSchema,
+          currentPath === 'root' ? prop : `${currentPath}.${prop}`,
+          errors,
+          oasObj,
+          files,
+          mainFile,
+          depth + 1
+        );
+      }
+    }
+
+    // Check for additional properties if additionalProperties is false
+    if (schema.additionalProperties === false) {
+      for (const prop of Object.keys(value)) {
+        if (!(prop in properties)) {
+          errors.push({
+            field: `${currentPath}.${prop}`,
+            message: `Additional property '${prop}' is not allowed`,
+            value: value[prop]
+          });
+        }
+      }
+    }
+  } else if (expectedType === 'array' || schema.items) {
+    if (!Array.isArray(value)) {
+      errors.push({
+        field: currentPath,
+        message: `Expected array but got ${typeof value}`,
+        value: value
+      });
+      return;
+    }
+
+    // Validate array items
+    if (schema.items) {
+      value.forEach((item, index) => {
+        validateAgainstSchema(
+          item,
+          schema.items,
+          `${currentPath}[${index}]`,
+          errors,
+          oasObj,
+          files,
+          mainFile,
+          depth + 1
+        );
+      });
+    }
+
+    // Check minItems/maxItems
+    if (schema.minItems !== undefined && value.length < schema.minItems) {
+      errors.push({
+        field: currentPath,
+        message: `Array length ${value.length} is less than minimum ${schema.minItems}`,
+        value: value.length,
+        expected: `>= ${schema.minItems}`
+      });
+    }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      errors.push({
+        field: currentPath,
+        message: `Array length ${value.length} exceeds maximum ${schema.maxItems}`,
+        value: value.length,
+        expected: `<= ${schema.maxItems}`
+      });
+    }
+  } else if (expectedType === 'string') {
+    if (typeof value !== 'string') {
+      errors.push({
+        field: currentPath,
+        message: `Expected string but got ${typeof value}`,
+        value: value
+      });
+      return;
+    }
+
+    // Check pattern
+    if (schema.pattern) {
+      const regex = new RegExp(schema.pattern);
+      if (!regex.test(value)) {
+        errors.push({
+          field: currentPath,
+          message: `String does not match pattern '${schema.pattern}'`,
+          value: value,
+          expected: schema.pattern
+        });
+      }
+    }
+
+    // Check minLength/maxLength
+    if (schema.minLength !== undefined && value.length < schema.minLength) {
+      errors.push({
+        field: currentPath,
+        message: `String length ${value.length} is less than minimum ${schema.minLength}`,
+        value: value.length,
+        expected: `>= ${schema.minLength}`
+      });
+    }
+    if (schema.maxLength !== undefined && value.length > schema.maxLength) {
+      errors.push({
+        field: currentPath,
+        message: `String length ${value.length} exceeds maximum ${schema.maxLength}`,
+        value: value.length,
+        expected: `<= ${schema.maxLength}`
+      });
+    }
+
+    // Check enum
+    if (schema.enum && !schema.enum.includes(value)) {
+      errors.push({
+        field: currentPath,
+        message: `Value '${value}' is not in allowed enum values`,
+        value: value,
+        expected: schema.enum.join(', ')
+      });
+    }
+  } else if (expectedType === 'number' || expectedType === 'integer') {
+    if (typeof value !== 'number') {
+      errors.push({
+        field: currentPath,
+        message: `Expected number but got ${typeof value}`,
+        value: value
+      });
+      return;
+    }
+
+    // Check integer
+    if (expectedType === 'integer' && !Number.isInteger(value)) {
+      errors.push({
+        field: currentPath,
+        message: `Expected integer but got decimal number`,
+        value: value
+      });
+    }
+
+    // Check minimum/maximum
+    if (schema.minimum !== undefined && value < schema.minimum) {
+      errors.push({
+        field: currentPath,
+        message: `Value ${value} is less than minimum ${schema.minimum}`,
+        value: value,
+        expected: `>= ${schema.minimum}`
+      });
+    }
+    if (schema.maximum !== undefined && value > schema.maximum) {
+      errors.push({
+        field: currentPath,
+        message: `Value ${value} exceeds maximum ${schema.maximum}`,
+        value: value,
+        expected: `<= ${schema.maximum}`
+      });
+    }
+  } else if (expectedType === 'boolean') {
+    if (typeof value !== 'boolean') {
+      errors.push({
+        field: currentPath,
+        message: `Expected boolean but got ${typeof value}`,
+        value: value
+      });
+    }
+  }
+}
