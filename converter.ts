@@ -2375,6 +2375,7 @@ export async function validatePayload(
     path: string;
     method: string;
     type: 'request' | 'response';
+    headers?: any;
   }
 ): Promise<{ valid: boolean; errors: any[] }> {
   try {
@@ -2383,7 +2384,7 @@ export async function validatePayload(
     console.log('Main file:', mainOasFile);
     console.log('Options:', options);
     
-    let { payload, path, method, type } = options;
+    let { payload, path, method, type, headers } = options;
     const errors: any[] = [];
 
     // Extract query parameters from path if present (e.g., /orders?id=3&name=GBSS)
@@ -2517,20 +2518,21 @@ export async function validatePayload(
           const parameters = methodDef.parameters || pathDef.parameters || [];
           console.log(`Found ${parameters.length} parameters for ${method} ${cleanPath}`);
           
-          if (parameters.length === 0) {
-            // No parameters and no request body - nothing to validate
+          if (parameters.length === 0 && !headers) {
+            // No parameters, no headers, and no request body - nothing to validate
             console.log(`No request body or parameters defined for ${method} ${cleanPath}. Skipping validation.`);
             return { valid: true, errors: [] };
           }
           
-          // Merge extracted query params, path params, and any payload provided
+          // Merge extracted query params, path params, headers, and any payload provided
           const allParams = {
             ...queryParams,
             ...pathParams,
-            ...(payload && typeof payload === 'object' ? payload : {})
+            ...(payload && typeof payload === 'object' ? payload : {}),
+            ...(headers && typeof headers === 'object' ? headers : {})
           };
           
-          if (Object.keys(allParams).length > 0) {
+          if (Object.keys(allParams).length > 0 || parameters.length > 0) {
             console.log('Validating parameters with merged values:', allParams);
             validateParameters(parameters, allParams, errors, oasObj, files, mainOasFile);
             return { valid: errors.length === 0, errors };
@@ -3053,7 +3055,19 @@ function validateParameters(
     console.log(`Checking parameter: ${paramName} (${paramIn}), required: ${required}`);
     
     // Check if parameter value is provided
-    const paramValue = paramValues[paramName];
+    // For headers, do case-insensitive lookup
+    let paramValue;
+    if (paramIn === 'header') {
+      // Create a case-insensitive lookup for headers
+      const lowerParamName = paramName.toLowerCase();
+      const matchingKey = Object.keys(paramValues).find(
+        key => key.toLowerCase() === lowerParamName
+      );
+      paramValue = matchingKey ? paramValues[matchingKey] : undefined;
+    } else {
+      // For query, path, cookie - exact match
+      paramValue = paramValues[paramName];
+    }
     
     if (required && (paramValue === undefined || paramValue === null || paramValue === '')) {
       errors.push({
