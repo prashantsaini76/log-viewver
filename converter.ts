@@ -2383,8 +2383,27 @@ export async function validatePayload(
     console.log('Main file:', mainOasFile);
     console.log('Options:', options);
     
-    const { payload, path, method, type } = options;
+    let { payload, path, method, type } = options;
     const errors: any[] = [];
+
+    // Extract query parameters from path if present (e.g., /orders?id=3&name=GBSS)
+    let queryParams: any = {};
+    let cleanPath = path;
+    
+    if (path.includes('?')) {
+      const [pathPart, queryString] = path.split('?');
+      cleanPath = pathPart;
+      
+      // Parse query string
+      const queryPairs = queryString.split('&');
+      for (const pair of queryPairs) {
+        const [key, value] = pair.split('=');
+        if (key) {
+          queryParams[decodeURIComponent(key)] = decodeURIComponent(value || '');
+        }
+      }
+      console.log('Extracted query parameters:', queryParams);
+    }
 
     // Get the main OAS content
     let mainContent = files[mainOasFile];
@@ -2409,20 +2428,36 @@ export async function validatePayload(
 
     // Find the path in OAS
     const paths = oasObj.paths || {};
-    let pathDef = paths[path];
+    let pathDef = paths[cleanPath];
+    let pathParams: any = {};
+    let matchedPathTemplate = cleanPath;
 
-    console.log('Looking for path:', path);
+    console.log('Looking for path:', cleanPath);
     console.log('Found pathDef:', pathDef ? 'yes' : 'no');
 
     // If exact path not found, try to match path parameters
     if (!pathDef) {
       const pathKeys = Object.keys(paths);
       for (const key of pathKeys) {
-        // Convert OAS path template to regex (e.g., /users/{id} -> /users/[^/]+)
-        const pattern = key.replace(/\{[^}]+\}/g, '[^/]+');
+        // Convert OAS path template to regex (e.g., /users/{id} -> /users/([^/]+))
+        const paramNames: string[] = [];
+        const pattern = key.replace(/\{([^}]+)\}/g, (match, paramName) => {
+          paramNames.push(paramName);
+          return '([^/?]+)';
+        });
         const regex = new RegExp(`^${pattern}$`);
-        if (regex.test(path)) {
+        const matches = cleanPath.match(regex);
+        
+        if (matches) {
           pathDef = paths[key];
+          matchedPathTemplate = key;
+          
+          // Extract path parameter values
+          for (let i = 0; i < paramNames.length; i++) {
+            pathParams[paramNames[i]] = matches[i + 1];
+          }
+          console.log('Matched path template:', key);
+          console.log('Extracted path parameters:', pathParams);
           break;
         }
       }
@@ -2431,8 +2466,8 @@ export async function validatePayload(
     if (!pathDef) {
       errors.push({
         field: 'path',
-        message: `Path '${path}' not found in OpenAPI specification. Available paths: ${Object.keys(paths).join(', ')}`,
-        value: path
+        message: `Path '${cleanPath}' not found in OpenAPI specification. Available paths: ${Object.keys(paths).join(', ')}`,
+        value: cleanPath
       });
       return { valid: false, errors };
     }
@@ -2480,23 +2515,36 @@ export async function validatePayload(
         if (['GET', 'HEAD', 'DELETE'].includes(methodUpper)) {
           // Check if there are parameters defined
           const parameters = methodDef.parameters || pathDef.parameters || [];
+          console.log(`Found ${parameters.length} parameters for ${method} ${cleanPath}`);
           
           if (parameters.length === 0) {
             // No parameters and no request body - nothing to validate
-            console.log(`No request body or parameters defined for ${method} ${path}. Skipping validation.`);
+            console.log(`No request body or parameters defined for ${method} ${cleanPath}. Skipping validation.`);
             return { valid: true, errors: [] };
           }
           
-          // If payload was provided for a GET request, it might be query params or path params
-          // For now, we'll consider it valid if the endpoint exists
-          console.log(`${method} request with parameters. Parameters should be validated separately.`);
+          // Merge extracted query params, path params, and any payload provided
+          const allParams = {
+            ...queryParams,
+            ...pathParams,
+            ...(payload && typeof payload === 'object' ? payload : {})
+          };
+          
+          if (Object.keys(allParams).length > 0) {
+            console.log('Validating parameters with merged values:', allParams);
+            validateParameters(parameters, allParams, errors, oasObj, files, mainOasFile);
+            return { valid: errors.length === 0, errors };
+          }
+          
+          // No parameters provided - just check if endpoint exists
+          console.log(`${method} request with ${parameters.length} parameters defined. No parameter values to validate.`);
           return { valid: true, errors: [] };
         }
         
         // For POST, PUT, PATCH - request body is expected
         errors.push({
           field: 'requestBody',
-          message: `No request body defined for ${method} ${path}`,
+          message: `No request body defined for ${method} ${cleanPath}`,
           value: null
         });
         return { valid: false, errors };
@@ -2532,7 +2580,7 @@ export async function validatePayload(
       if (!successCode) {
         errors.push({
           field: 'response',
-          message: `No success response defined for ${method} ${path}`,
+          message: `No success response defined for ${method} ${cleanPath}`,
           value: null
         });
         return { valid: false, errors };
@@ -2971,6 +3019,101 @@ function validateAgainstSchema(
         message: `Expected boolean but got ${typeof value}`,
         value: value
       });
+    }
+  }
+}
+
+/**
+ * Validate request parameters (query, path, header, cookie)
+ */
+function validateParameters(
+  parameters: any[],
+  paramValues: any,
+  errors: any[],
+  oasObj: any,
+  files: { [key: string]: string },
+  mainFile: string
+): void {
+  console.log('Validating parameters:', parameters.length);
+  
+  for (const param of parameters) {
+    let paramDef = param;
+    
+    // Resolve parameter $ref if present
+    if (paramDef.$ref) {
+      console.log('Resolving parameter $ref:', paramDef.$ref);
+      paramDef = resolveRef(paramDef.$ref, oasObj, files, mainFile);
+    }
+    
+    const paramName = paramDef.name;
+    const paramIn = paramDef.in; // 'query', 'path', 'header', 'cookie'
+    const required = paramDef.required || false;
+    const schema = paramDef.schema || {};
+    
+    console.log(`Checking parameter: ${paramName} (${paramIn}), required: ${required}`);
+    
+    // Check if parameter value is provided
+    const paramValue = paramValues[paramName];
+    
+    if (required && (paramValue === undefined || paramValue === null || paramValue === '')) {
+      errors.push({
+        field: paramName,
+        message: `Required ${paramIn} parameter '${paramName}' is missing`,
+        value: paramValue,
+        expected: 'required'
+      });
+      continue;
+    }
+    
+    // If not required and not provided, skip validation
+    if (paramValue === undefined || paramValue === null) {
+      continue;
+    }
+    
+    // Validate parameter value against schema
+    if (schema) {
+      // Resolve schema $ref if present
+      let resolvedSchema = schema;
+      if (schema.$ref) {
+        resolvedSchema = resolveRef(schema.$ref, oasObj, files, mainFile);
+      }
+      
+      // Convert string values to appropriate types based on schema
+      let convertedValue = paramValue;
+      if (typeof paramValue === 'string' && resolvedSchema.type) {
+        if (resolvedSchema.type === 'integer' || resolvedSchema.type === 'number') {
+          convertedValue = Number(paramValue);
+          if (isNaN(convertedValue)) {
+            errors.push({
+              field: paramName,
+              message: `Parameter '${paramName}' should be a ${resolvedSchema.type} but got '${paramValue}'`,
+              value: paramValue,
+              expected: resolvedSchema.type
+            });
+            continue;
+          }
+        } else if (resolvedSchema.type === 'boolean') {
+          if (paramValue === 'true') convertedValue = true;
+          else if (paramValue === 'false') convertedValue = false;
+          else {
+            errors.push({
+              field: paramName,
+              message: `Parameter '${paramName}' should be a boolean but got '${paramValue}'`,
+              value: paramValue,
+              expected: 'true or false'
+            });
+            continue;
+          }
+        } else if (resolvedSchema.type === 'array') {
+          // For array parameters, value might be comma-separated or already an array
+          if (typeof paramValue === 'string') {
+            convertedValue = paramValue.split(',').map(v => v.trim());
+          }
+        }
+      }
+      
+      // Validate the converted value against the schema
+      validateAgainstSchema(convertedValue, resolvedSchema, paramName, errors, oasObj, files, mainFile);
     }
   }
 }
