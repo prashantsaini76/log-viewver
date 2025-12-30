@@ -2524,13 +2524,17 @@ export async function validatePayload(
             return { valid: true, errors: [] };
           }
           
-          // Merge extracted query params, path params, headers, and any payload provided
+          // Merge extracted query params, path params, and any payload provided
           const allParams = {
             ...queryParams,
             ...pathParams,
-            ...(payload && typeof payload === 'object' ? payload : {}),
-            ...(headers && typeof headers === 'object' ? headers : {})
+            ...(payload && typeof payload === 'object' ? payload : {})
           };
+          
+          // Only include headers if they were explicitly provided for validation
+          if (headers && typeof headers === 'object' && Object.keys(headers).length > 0) {
+            Object.assign(allParams, headers);
+          }
           
           if (Object.keys(allParams).length > 0 || parameters.length > 0) {
             console.log('Validating parameters with merged values:', allParams);
