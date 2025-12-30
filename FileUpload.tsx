@@ -161,13 +161,17 @@ export default function FileUpload({ onUpload, isConverting, mode, savedValidati
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    API Path:
+                    API Path {method && ['GET', 'HEAD', 'DELETE'].includes(method) ? '(with query params)' : ''}:
                   </label>
                   <input
                     type="text"
                     value={path}
                     onChange={(e) => setPath(e.target.value)}
-                    placeholder="/users/{id}"
+                    placeholder={
+                      method && ['GET', 'HEAD', 'DELETE'].includes(method)
+                        ? "/orders?id=3&name=GBSS"
+                        : "/users/{id}"
+                    }
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent"
                   />
                 </div>
@@ -217,14 +221,16 @@ export default function FileUpload({ onUpload, isConverting, mode, savedValidati
               </div>
               <div>
                 <label className="block text-sm font-semibold text-gray-700 mb-2">
-                  JSON Payload{validationType === 'request' && ['GET', 'HEAD', 'DELETE'].includes(method) ? ' (Optional for ' + method + ')' : ''}:
+                  {validationType === 'request' && ['GET', 'HEAD', 'DELETE'].includes(method) 
+                    ? 'Additional Parameters (Optional)'
+                    : 'JSON Payload'}:
                 </label>
                 <textarea
                   value={payload}
                   onChange={(e) => setPayload(e.target.value)}
                   placeholder={
                     validationType === 'request' && ['GET', 'HEAD', 'DELETE'].includes(method)
-                      ? 'Optional - Leave empty for parameter-based requests'
+                      ? '{"limit": "10"} - Optional extra parameters'
                       : '{"id": 123, "name": "John Doe"}'
                   }
                   rows={6}
@@ -232,7 +238,10 @@ export default function FileUpload({ onUpload, isConverting, mode, savedValidati
                 />
                 {validationType === 'request' && ['GET', 'HEAD', 'DELETE'].includes(method) && (
                   <p className="mt-1 text-xs text-gray-500">
-                    💡 {method} requests typically use URL parameters. Leave payload empty to validate the endpoint exists.
+                    💡 <strong>Auto-parse enabled:</strong> Put query params in the path above.<br/>
+                    • <code className="bg-gray-100 px-1 rounded">/orders?id=3&name=GBSS</code> - Query params extracted automatically<br/>
+                    • <code className="bg-gray-100 px-1 rounded">/orders/123</code> - Path params extracted automatically<br/>
+                    • Use this field only for additional parameters not in the URL
                   </p>
                 )}
               </div>
