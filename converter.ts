@@ -2471,7 +2471,29 @@ export async function validatePayload(
       let requestBody = methodDef.requestBody;
       console.log('RequestBody:', requestBody ? 'found' : 'not found');
       
+      // For GET, HEAD, DELETE methods, request body is typically not used
+      // If no request body is defined, validate parameters instead or skip validation
       if (!requestBody) {
+        const methodUpper = method.toUpperCase();
+        
+        // For methods that typically don't have bodies, validate parameters if provided
+        if (['GET', 'HEAD', 'DELETE'].includes(methodUpper)) {
+          // Check if there are parameters defined
+          const parameters = methodDef.parameters || pathDef.parameters || [];
+          
+          if (parameters.length === 0) {
+            // No parameters and no request body - nothing to validate
+            console.log(`No request body or parameters defined for ${method} ${path}. Skipping validation.`);
+            return { valid: true, errors: [] };
+          }
+          
+          // If payload was provided for a GET request, it might be query params or path params
+          // For now, we'll consider it valid if the endpoint exists
+          console.log(`${method} request with parameters. Parameters should be validated separately.`);
+          return { valid: true, errors: [] };
+        }
+        
+        // For POST, PUT, PATCH - request body is expected
         errors.push({
           field: 'requestBody',
           message: `No request body defined for ${method} ${path}`,
