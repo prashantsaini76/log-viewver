@@ -17,6 +17,8 @@ export default function FileUpload({ onUpload, isConverting, mode, savedValidati
   const [path, setPath] = useState<string>(savedValidationData?.path || '/');
   const [method, setMethod] = useState<string>(savedValidationData?.method || 'GET');
   const [validationType, setValidationType] = useState<'request' | 'response'>(savedValidationData?.type || 'request');
+  const [headers, setHeaders] = useState<string>(savedValidationData?.headers ? JSON.stringify(savedValidationData.headers, null, 2) : '');
+  const [validateHeaders, setValidateHeaders] = useState<boolean>(savedValidationData?.validateHeaders || false);
 
   const handleDrag = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -74,13 +76,26 @@ export default function FileUpload({ onUpload, isConverting, mode, savedValidati
           return;
         }
         
+        // Parse headers if provided and validation is enabled
+        let headersObj = {};
+        if (validateHeaders && headers.trim()) {
+          try {
+            headersObj = JSON.parse(headers);
+          } catch (e) {
+            alert('Invalid JSON in Headers: ' + (e instanceof Error ? e.message : 'Unknown error'));
+            return;
+          }
+        }
+        
         // For GET/HEAD/DELETE with no payload, send empty object
         if (!payload && isPayloadOptional) {
           onUpload(selectedFile, {
             payload: {},
             path,
             method,
-            type: validationType
+            type: validationType,
+            headers: validateHeaders ? headersObj : undefined,
+            validateHeaders
           });
           return;
         }
@@ -91,7 +106,9 @@ export default function FileUpload({ onUpload, isConverting, mode, savedValidati
             payload: payloadObj,
             path,
             method,
-            type: validationType
+            type: validationType,
+            headers: validateHeaders ? headersObj : undefined,
+            validateHeaders
           });
         } catch (e) {
           alert('Invalid JSON payload: ' + (e instanceof Error ? e.message : 'Unknown error'));
@@ -243,6 +260,37 @@ export default function FileUpload({ onUpload, isConverting, mode, savedValidati
                     • <code className="bg-gray-100 px-1 rounded">/orders/123</code> - Path params extracted automatically<br/>
                     • Use this field only for additional parameters not in the URL
                   </p>
+                )}
+              </div>
+              <div>
+                <div className="flex items-center mb-2">
+                  <input
+                    type="checkbox"
+                    id="validateHeaders"
+                    checked={validateHeaders}
+                    onChange={(e) => setValidateHeaders(e.target.checked)}
+                    className="w-4 h-4 text-primary-600 border-gray-300 rounded focus:ring-2 focus:ring-primary-500"
+                  />
+                  <label htmlFor="validateHeaders" className="ml-2 text-sm font-semibold text-gray-700">
+                    Validate Headers
+                  </label>
+                </div>
+                {validateHeaders && (
+                  <>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Headers (Optional):
+                    </label>
+                    <textarea
+                      value={headers}
+                      onChange={(e) => setHeaders(e.target.value)}
+                      placeholder='{"Authorization": "Bearer token123", "Content-Type": "application/json"}'
+                      rows={3}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-transparent font-mono text-sm"
+                    />
+                    <p className="mt-1 text-xs text-gray-500">
+                      💡 Provide HTTP headers as JSON. Useful for Authorization, Content-Type, custom headers, etc.
+                    </p>
+                  </>
                 )}
               </div>
             </div>
