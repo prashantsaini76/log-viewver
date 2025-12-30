@@ -2538,7 +2538,14 @@ export async function validatePayload(
           
           if (Object.keys(allParams).length > 0 || parameters.length > 0) {
             console.log('Validating parameters with merged values:', allParams);
-            validateParameters(parameters, allParams, errors, oasObj, files, mainOasFile);
+            // Filter out header parameters if headers were not provided for validation
+            const parametersToValidate = !headers 
+              ? parameters.filter((p: any) => {
+                  const param = p.$ref ? resolveRef(p.$ref, oasObj, files, mainOasFile) : p;
+                  return param.in !== 'header';
+                })
+              : parameters;
+            validateParameters(parametersToValidate, allParams, errors, oasObj, files, mainOasFile);
             return { valid: errors.length === 0, errors };
           }
           
